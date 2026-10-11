@@ -160,7 +160,7 @@ func (state *State) actionCreateMessage(
 		InternalID:  internalID,
 	}
 
-	messageUID, flagSet, err := tx.CreateMessageAndAddToMailbox(ctx, mboxID.InternalID, &req)
+	messageUID, flagSet, modSeq, err := tx.CreateMessageAndAddToMailbox(ctx, mboxID.InternalID, &req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -174,7 +174,7 @@ func (state *State) actionCreateMessage(
 
 	updates = append(updates, newExistsStateUpdateWithExists(
 		mboxID.InternalID,
-		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet)},
+		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet, modSeq)},
 		st,
 	))
 
@@ -221,7 +221,7 @@ func (state *State) actionCreateRecoveredMessage(
 
 	recoveryMBoxID := state.user.GetRecoveryMailboxID()
 
-	messageUID, flagSet, err := tx.CreateMessageAndAddToMailbox(ctx, recoveryMBoxID.InternalID, &req)
+	messageUID, flagSet, modSeq, err := tx.CreateMessageAndAddToMailbox(ctx, recoveryMBoxID.InternalID, &req)
 	if err != nil {
 		return nil, false, err
 	}
@@ -229,7 +229,7 @@ func (state *State) actionCreateRecoveredMessage(
 	updates := []Update{
 		newExistsStateUpdateWithExists(
 			recoveryMBoxID.InternalID,
-			[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: remoteID}, messageUID, flagSet)},
+			[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: remoteID}, messageUID, flagSet, modSeq)},
 			nil,
 		),
 	}

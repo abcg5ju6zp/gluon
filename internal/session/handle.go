@@ -54,7 +54,8 @@ func (s *Session) handleCommand(
 		*command.Capability,
 		*command.IDGet,
 		*command.IDSet,
-		*command.Noop:
+		*command.Noop,
+		*command.Enable:
 		return s.handleAnyCommand(ctx, tag, cmd, ch)
 
 	case
@@ -116,6 +117,10 @@ func (s *Session) handleAnyCommand(
 	case *command.IDGet:
 		// RFC 2971 ID
 		return s.handleIDGet(ctx, tag, ch)
+
+	case *command.Enable:
+		// RFC 5161 ENABLE
+		return s.handleEnable(ctx, tag, cmd, ch)
 
 	default:
 		return fmt.Errorf("bad command")

@@ -16,6 +16,8 @@ type snapshot struct {
 
 	state    *State
 	messages *snapMsgList
+
+	highestModSeq imap.ModSeq
 }
 
 func newSnapshot(ctx context.Context, state *State, client db.ReadOnly, mbox *db.Mailbox) (*snapshot, error) {
@@ -25,9 +27,10 @@ func newSnapshot(ctx context.Context, state *State, client db.ReadOnly, mbox *db
 	}
 
 	snap := &snapshot{
-		mboxID:   db.NewMailboxIDPair(mbox),
-		state:    state,
-		messages: newMsgList(len(snapshotMessages)),
+		mboxID:        db.NewMailboxIDPair(mbox),
+		state:         state,
+		messages:      newMsgList(len(snapshotMessages)),
+		highestModSeq: mbox.HighestModSeq,
 	}
 
 	for _, snapshotMessage := range snapshotMessages {
@@ -35,6 +38,7 @@ func newSnapshot(ctx context.Context, state *State, client db.ReadOnly, mbox *db
 			db.MessageIDPair{InternalID: snapshotMessage.InternalID, RemoteID: snapshotMessage.RemoteID},
 			snapshotMessage.UID,
 			snapshotMessage.GetFlagSet(),
+			snapshotMessage.ModSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -45,9 +49,10 @@ func newSnapshot(ctx context.Context, state *State, client db.ReadOnly, mbox *db
 
 func newEmptySnapshot(state *State, mbox *db.Mailbox) *snapshot {
 	return &snapshot{
-		mboxID:   db.NewMailboxIDPair(mbox),
-		state:    state,
-		messages: newMsgList(0),
+		mboxID:        db.NewMailboxIDPair(mbox),
+		state:         state,
+		messages:      newMsgList(0),
+		highestModSeq: mbox.HighestModSeq,
 	}
 }
 
@@ -84,6 +89,29 @@ func (snap *snapshot) getMessageFlags(messageID imap.InternalMessageID) (imap.Fl
 	}
 
 	return msg.flags, nil
+}
+
+func (snap *snapshot) setMessageModSeq(messageID imap.InternalMessageID, modSeq imap.ModSeq) error {
+	msg, ok := snap.messages.get(messageID)
+	if !ok {
+		return ErrNoSuchMessage
+	}
+
+	msg.modSeq = modSeq
+
+	return nil
+}
+
+// advanceHighestModSeq raises the snapshot watermark if the given value is
+// greater than the currently known one.
+func (snap *snapshot) advanceHighestModSeq(modSeq imap.ModSeq) {
+	if modSeq > snap.highestModSeq {
+		snap.highestModSeq = modSeq
+	}
+}
+
+func (snap *snapshot) HighestModSeq() imap.ModSeq {
+	return snap.highestModSeq
 }
 
 func (snap *snapshot) setMessageFlags(messageID imap.InternalMessageID, flags imap.FlagSet) error {
@@ -237,19 +265,21 @@ func (snap *snapshot) getMessagesWithoutFlagCount(flag string) int {
 	})
 }
 
-func (snap *snapshot) appendMessage(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet) error {
+func (snap *snapshot) appendMessage(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet, modSeq imap.ModSeq) error {
 	return snap.messages.insert(
 		messageID,
 		uid,
 		flags,
+		modSeq,
 	)
 }
 
-func (snap *snapshot) appendMessageFromOtherState(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet) error {
+func (snap *snapshot) appendMessageFromOtherState(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet, modSeq imap.ModSeq) error {
 	snap.messages.insertOutOfOrder(
 		messageID,
 		uid,
 		flags,
+		modSeq,
 	)
 
 	return nil

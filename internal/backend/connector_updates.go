@@ -577,8 +577,6 @@ func (user *user) applyMessagesRemovedFromMailbox(ctx context.Context, tx db.Tra
 }
 
 func (user *user) setMessageFlags(ctx context.Context, tx db.Transaction, messageID imap.InternalMessageID, flags imap.FlagSet) ([]state.Update, error) {
-	var stateUpdates []state.Update
-
 	curFlags, err := tx.GetMessagesFlags(ctx, []imap.InternalMessageID{messageID})
 	if err != nil {
 		return nil, err
@@ -586,45 +584,60 @@ func (user *user) setMessageFlags(ctx context.Context, tx db.Transaction, messag
 
 	flagSet := curFlags[0].FlagSet
 
+	var flagsToRemove []string
+
 	for _, v := range flagSet.ToSliceUnsorted() {
 		if !flags.Contains(v) {
-			update, err := user.removeMessageFlags(ctx, tx, messageID, v)
-			if err != nil {
-				return nil, err
-			}
-
-			stateUpdates = append(stateUpdates, update)
+			flagsToRemove = append(flagsToRemove, v)
 		}
 	}
+
+	var flagsToAdd []string
 
 	for _, v := range flags.ToSliceUnsorted() {
 		if !flagSet.Contains(v) {
-			update, err := user.addMessageFlags(ctx, tx, messageID, v)
-			if err != nil {
-				return nil, err
-			}
-
-			stateUpdates = append(stateUpdates, update)
+			flagsToAdd = append(flagsToAdd, v)
 		}
 	}
 
+	for _, flag := range flagsToRemove {
+		if err := tx.RemoveFlagFromMessages(ctx, []imap.InternalMessageID{messageID}, flag); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, flag := range flagsToAdd {
+		if err := tx.AddFlagToMessages(ctx, []imap.InternalMessageID{messageID}, flag); err != nil {
+			return nil, err
+		}
+	}
+
+	// One mod-sequence per affected mailbox for the whole flag update, regardless
+	// of how many individual flags changed.
+	var modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
+
+	if len(flagsToAdd) != 0 || len(flagsToRemove) != 0 {
+		if _, modSeqByMailbox, err = tx.AssignModSeqForMessageMetadata(
+			ctx,
+			0,
+			nil,
+			[]imap.InternalMessageID{messageID},
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	stateUpdates := make([]state.Update, 0, len(flagsToRemove)+len(flagsToAdd))
+
+	for _, v := range flagsToRemove {
+		stateUpdates = append(stateUpdates, state.NewRemoteRemoveMessageFlagsStateUpdate(messageID, v, modSeqByMailbox))
+	}
+
+	for _, v := range flagsToAdd {
+		stateUpdates = append(stateUpdates, state.NewRemoteAddMessageFlagsStateUpdate(messageID, v, modSeqByMailbox))
+	}
+
 	return stateUpdates, nil
-}
-
-func (user *user) addMessageFlags(ctx context.Context, tx db.Transaction, messageID imap.InternalMessageID, flag string) (state.Update, error) {
-	if err := tx.AddFlagToMessages(ctx, []imap.InternalMessageID{messageID}, flag); err != nil {
-		return nil, err
-	}
-
-	return state.NewRemoteAddMessageFlagsStateUpdate(messageID, flag), nil
-}
-
-func (user *user) removeMessageFlags(ctx context.Context, tx db.Transaction, messageID imap.InternalMessageID, flag string) (state.Update, error) {
-	if err := tx.RemoveFlagFromMessages(ctx, []imap.InternalMessageID{messageID}, flag); err != nil {
-		return nil, err
-	}
-
-	return state.NewRemoteRemoveMessageFlagsStateUpdate(messageID, flag), nil
 }
 
 func (user *user) applyMessageDeleted(ctx context.Context, update *imap.MessageDeleted) error {

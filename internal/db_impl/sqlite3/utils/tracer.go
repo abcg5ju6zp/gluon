@@ -141,6 +141,30 @@ func (r ReadTracer) GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID 
 	return r.RD.GetMailboxMessageForNewSnapshot(ctx, mboxID)
 }
 
+func (r ReadTracer) GetMailboxMessagesChangedSince(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]db.SnapshotMessageResult, error) {
+	r.Entry.Tracef("GetMailboxMessagesChangedSince")
+
+	return r.RD.GetMailboxMessagesChangedSince(ctx, mboxID, since)
+}
+
+func (r ReadTracer) GetMailboxHighestModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error) {
+	r.Entry.Tracef("GetMailboxHighestModSeq")
+
+	return r.RD.GetMailboxHighestModSeq(ctx, mboxID)
+}
+
+func (r ReadTracer) GetVanishedUIDsAfterModSeq(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]imap.UID, error) {
+	r.Entry.Tracef("GetVanishedUIDsAfterModSeq")
+
+	return r.RD.GetVanishedUIDsAfterModSeq(ctx, mboxID, since)
+}
+
+func (r ReadTracer) GetVanishedHistoryPrunedModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error) {
+	r.Entry.Tracef("GetVanishedHistoryPrunedModSeq")
+
+	return r.RD.GetVanishedHistoryPrunedModSeq(ctx, mboxID)
+}
+
 func (r ReadTracer) MailboxTranslateRemoteIDs(ctx context.Context, mboxIDs []imap.MailboxID) ([]imap.InternalMailboxID, error) {
 	r.Entry.Tracef("MailboxTranslateRemoteIDs")
 
@@ -328,7 +352,7 @@ func (w WriteTracer) RemoveMessagesFromMailbox(
 	ctx context.Context,
 	mboxID imap.InternalMailboxID,
 	messageIDs []imap.InternalMessageID,
-) error {
+) (imap.ModSeq, error) {
 	w.Entry.Tracef("RemoveMessagesFromMailbox")
 
 	return w.TX.RemoveMessagesFromMailbox(ctx, mboxID, messageIDs)
@@ -385,6 +409,17 @@ func (w WriteTracer) SetMailboxUIDValidity(ctx context.Context, mboxID imap.Inte
 	return w.TX.SetMailboxUIDValidity(ctx, mboxID, uidValidity)
 }
 
+func (w WriteTracer) AssignModSeqForMessageMetadata(
+	ctx context.Context,
+	originMboxID imap.InternalMailboxID,
+	originChangedIDs []imap.InternalMessageID,
+	globalChangedIDs []imap.InternalMessageID,
+) (imap.ModSeq, map[imap.InternalMailboxID]imap.ModSeq, error) {
+	w.Entry.Tracef("AssignModSeqForMessageMetadata")
+
+	return w.TX.AssignModSeqForMessageMetadata(ctx, originMboxID, originChangedIDs, globalChangedIDs)
+}
+
 func (w WriteTracer) CreateMessages(ctx context.Context, reqs ...*db.CreateMessageReq) error {
 	w.Entry.Tracef("CreateMessages")
 
@@ -395,7 +430,7 @@ func (w WriteTracer) CreateMessageAndAddToMailbox(
 	ctx context.Context,
 	mbox imap.InternalMailboxID,
 	req *db.CreateMessageReq,
-) (imap.UID, imap.FlagSet, error) {
+) (imap.UID, imap.FlagSet, imap.ModSeq, error) {
 	w.Entry.Tracef("CreateMessageAndAddToMailbox")
 
 	return w.TX.CreateMessageAndAddToMailbox(ctx, mbox, req)

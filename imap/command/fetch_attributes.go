@@ -86,6 +86,12 @@ func (f FetchAttributeUID) String() string {
 	return "UID"
 }
 
+type FetchAttributeModSeq struct{}
+
+func (f FetchAttributeModSeq) String() string {
+	return "MODSEQ"
+}
+
 type BodySection interface {
 	String() string
 }

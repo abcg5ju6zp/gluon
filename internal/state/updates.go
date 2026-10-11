@@ -50,18 +50,20 @@ func (u *messageFlagsComboStateUpdate) String() string {
 
 type messageFlagsAddedStateUpdate struct {
 	AllStateFilter
-	messageIDs []imap.InternalMessageID
-	flags      imap.FlagSet
-	mboxID     db.MailboxIDPair
-	stateID    StateID
+	messageIDs      []imap.InternalMessageID
+	flags           imap.FlagSet
+	mboxID          db.MailboxIDPair
+	stateID         StateID
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func newMessageFlagsAddedStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID) Update {
+func newMessageFlagsAddedStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq) Update {
 	return &messageFlagsAddedStateUpdate{
-		flags:      flags,
-		mboxID:     mboxID,
-		messageIDs: messageIDs,
-		stateID:    stateID,
+		flags:           flags,
+		mboxID:          mboxID,
+		messageIDs:      messageIDs,
+		stateID:         stateID,
+		modSeqByMailbox: modSeqByMailbox,
 	}
 }
 
@@ -76,6 +78,7 @@ func (u *messageFlagsAddedStateUpdate) Apply(ctx context.Context, tx db.Transact
 			s.StateID == u.stateID && contexts.IsSilent(ctx),
 			s.snap.mboxID != u.mboxID,
 			FetchFlagOpAdd,
+			u.modSeqByMailbox,
 		)); err != nil {
 			return err
 		}
@@ -169,13 +172,19 @@ func (state *State) applyMessageFlagsAdded(ctx context.Context,
 
 	flagStateUpdate := newMessageFlagsComboStateUpdate()
 
+	var deletedChangedIDs []imap.InternalMessageID
+
 	if addFlags.ContainsUnchecked(imap.FlagDeletedLowerCase) {
 		if err := tx.SetMailboxMessagesDeletedFlag(ctx, state.snap.mboxID.InternalID, messageIDs, true); err != nil {
 			return nil, err
 		}
 
-		flagStateUpdate.addUpdate(newMessageFlagsAddedStateUpdate(imap.NewFlagSet(imap.FlagDeleted), state.snap.mboxID, messageIDs, state.StateID))
+		deletedChangedIDs = state.filterSnapMessagesWithoutFlag(messageIDs, imap.FlagDeletedLowerCase)
+
+		flagStateUpdate.addUpdate(newMessageFlagsAddedStateUpdate(imap.NewFlagSet(imap.FlagDeleted), state.snap.mboxID, messageIDs, state.StateID, nil))
 	}
+
+	globalChangedIDSet := make(map[imap.InternalMessageID]struct{})
 
 	remainingFlags := addFlags.Remove(imap.FlagDeleted)
 	for _, flag := range remainingFlags {
@@ -193,7 +202,23 @@ func (state *State) applyMessageFlagsAdded(ctx context.Context,
 			return nil, err
 		}
 
-		flagStateUpdate.addUpdate(newMessageFlagsAddedStateUpdate(remainingFlags, state.snap.mboxID, messagesToFlag, state.StateID))
+		for _, id := range messagesToFlag {
+			globalChangedIDSet[id] = struct{}{}
+		}
+
+		flagStateUpdate.addUpdate(newMessageFlagsAddedStateUpdate(remainingFlags, state.snap.mboxID, messagesToFlag, state.StateID, nil))
+	}
+
+	modSeqByMailbox, err := state.assignMetadataModSeq(ctx, tx, deletedChangedIDs, globalChangedIDSet)
+	if err != nil {
+		return nil, err
+	}
+
+	// Propagate the allocated mod-sequences to the generated fetch responders.
+	for _, update := range flagStateUpdate.updates {
+		if added, ok := update.(*messageFlagsAddedStateUpdate); ok {
+			added.modSeqByMailbox = modSeqByMailbox
+		}
 	}
 
 	return append(allUpdates, flagStateUpdate), nil
@@ -201,18 +226,20 @@ func (state *State) applyMessageFlagsAdded(ctx context.Context,
 
 type messageFlagsRemovedStateUpdate struct {
 	AllStateFilter
-	messageIDs []imap.InternalMessageID
-	flags      imap.FlagSet
-	mboxID     db.MailboxIDPair
-	stateID    StateID
+	messageIDs      []imap.InternalMessageID
+	flags           imap.FlagSet
+	mboxID          db.MailboxIDPair
+	stateID         StateID
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func NewMessageFlagsRemovedStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID) Update {
+func NewMessageFlagsRemovedStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq) Update {
 	return &messageFlagsRemovedStateUpdate{
-		flags:      flags,
-		mboxID:     mboxID,
-		messageIDs: messageIDs,
-		stateID:    stateID,
+		flags:           flags,
+		mboxID:          mboxID,
+		messageIDs:      messageIDs,
+		stateID:         stateID,
+		modSeqByMailbox: modSeqByMailbox,
 	}
 }
 
@@ -227,6 +254,7 @@ func (u *messageFlagsRemovedStateUpdate) Apply(ctx context.Context, tx db.Transa
 			s.StateID == u.stateID && contexts.IsSilent(ctx),
 			s.snap.mboxID != u.mboxID,
 			FetchFlagOpRem,
+			u.modSeqByMailbox,
 		)); err != nil {
 			return err
 		}
@@ -317,13 +345,19 @@ func (state *State) applyMessageFlagsRemoved(ctx context.Context,
 
 	flagStateUpdate := newMessageFlagsComboStateUpdate()
 
+	var deletedChangedIDs []imap.InternalMessageID
+
 	if remFlags.ContainsUnchecked(imap.FlagDeletedLowerCase) {
 		if err := tx.SetMailboxMessagesDeletedFlag(ctx, state.snap.mboxID.InternalID, messageIDs, false); err != nil {
 			return nil, err
 		}
 
-		flagStateUpdate.addUpdate(NewMessageFlagsRemovedStateUpdate(imap.NewFlagSet(imap.FlagDeleted), state.snap.mboxID, messageIDs, state.StateID))
+		deletedChangedIDs = state.filterSnapMessagesWithFlag(messageIDs, imap.FlagDeletedLowerCase)
+
+		flagStateUpdate.addUpdate(NewMessageFlagsRemovedStateUpdate(imap.NewFlagSet(imap.FlagDeleted), state.snap.mboxID, messageIDs, state.StateID, nil))
 	}
+
+	globalChangedIDSet := make(map[imap.InternalMessageID]struct{})
 
 	remainingFlags := remFlags.Remove(imap.FlagDeleted)
 	for _, flag := range remainingFlags {
@@ -341,7 +375,22 @@ func (state *State) applyMessageFlagsRemoved(ctx context.Context,
 			return nil, err
 		}
 
-		flagStateUpdate.addUpdate(NewMessageFlagsRemovedStateUpdate(remainingFlags, state.snap.mboxID, messagesToFlag, state.StateID))
+		for _, id := range messagesToFlag {
+			globalChangedIDSet[id] = struct{}{}
+		}
+
+		flagStateUpdate.addUpdate(NewMessageFlagsRemovedStateUpdate(remainingFlags, state.snap.mboxID, messagesToFlag, state.StateID, nil))
+	}
+
+	modSeqByMailbox, err := state.assignMetadataModSeq(ctx, tx, deletedChangedIDs, globalChangedIDSet)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, update := range flagStateUpdate.updates {
+		if removed, ok := update.(*messageFlagsRemovedStateUpdate); ok {
+			removed.modSeqByMailbox = modSeqByMailbox
+		}
 	}
 
 	return append(allUpdates, flagStateUpdate), nil
@@ -349,18 +398,20 @@ func (state *State) applyMessageFlagsRemoved(ctx context.Context,
 
 type messageFlagsSetStateUpdate struct {
 	AllStateFilter
-	messageIDs []imap.InternalMessageID
-	flags      imap.FlagSet
-	mboxID     db.MailboxIDPair
-	stateID    StateID
+	messageIDs      []imap.InternalMessageID
+	flags           imap.FlagSet
+	mboxID          db.MailboxIDPair
+	stateID         StateID
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func NewMessageFlagsSetStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID) Update {
+func NewMessageFlagsSetStateUpdate(flags imap.FlagSet, mboxID db.MailboxIDPair, messageIDs []imap.InternalMessageID, stateID StateID, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq) Update {
 	return &messageFlagsSetStateUpdate{
-		flags:      flags,
-		mboxID:     mboxID,
-		messageIDs: messageIDs,
-		stateID:    stateID,
+		flags:           flags,
+		mboxID:          mboxID,
+		messageIDs:      messageIDs,
+		stateID:         stateID,
+		modSeqByMailbox: modSeqByMailbox,
 	}
 }
 
@@ -375,6 +426,7 @@ func (u *messageFlagsSetStateUpdate) Apply(ctx context.Context, tx db.Transactio
 			state.StateID == u.stateID && contexts.IsSilent(ctx),
 			state.snap.mboxID != u.mboxID,
 			FetchFlagOpSet,
+			u.modSeqByMailbox,
 		)); err != nil {
 			return err
 		}
@@ -465,18 +517,132 @@ func (state *State) applyMessageFlagsSet(ctx context.Context,
 		setFlags.AddToSelf(imap.ForwardFlagList...)
 	}
 
-	if err := tx.SetMailboxMessagesDeletedFlag(ctx, state.snap.mboxID.InternalID, messageIDs, setFlags.Contains(imap.FlagDeleted)); err != nil {
+	wantDeleted := setFlags.Contains(imap.FlagDeleted)
+
+	var deletedChangedIDs []imap.InternalMessageID
+
+	if wantDeleted {
+		deletedChangedIDs = state.filterSnapMessagesWithoutFlag(messageIDs, imap.FlagDeletedLowerCase)
+	} else {
+		deletedChangedIDs = state.filterSnapMessagesWithFlag(messageIDs, imap.FlagDeletedLowerCase)
+	}
+
+	if err := tx.SetMailboxMessagesDeletedFlag(ctx, state.snap.mboxID.InternalID, messageIDs, wantDeleted); err != nil {
 		return nil, err
 	}
 
 	remainingFlags := setFlags.Remove(imap.FlagDeleted)
-	if remainingFlags.Len() != 0 {
+
+	globalChangedIDSet := make(map[imap.InternalMessageID]struct{})
+
+	for _, cur := range curFlags {
+		if !cur.FlagSet.Equals(remainingFlags) {
+			globalChangedIDSet[cur.ID] = struct{}{}
+		}
+	}
+
+	if remainingFlags.Len() != 0 || len(globalChangedIDSet) != 0 {
 		if err := tx.SetFlagsOnMessages(ctx, messageIDs, remainingFlags); err != nil {
 			return nil, err
 		}
 	}
 
-	return append(allUpdates, NewMessageFlagsSetStateUpdate(setFlags, state.snap.mboxID, messageIDs, state.StateID)), nil
+	modSeqByMailbox, err := state.assignMetadataModSeq(ctx, tx, deletedChangedIDs, globalChangedIDSet)
+	if err != nil {
+		return nil, err
+	}
+
+	return append(allUpdates, NewMessageFlagsSetStateUpdate(setFlags, state.snap.mboxID, messageIDs, state.StateID, modSeqByMailbox)), nil
+}
+
+// filterSnapMessagesWithFlag returns the given messages whose snapshot entry
+// currently contains the given flag.
+func (state *State) filterSnapMessagesWithFlag(messageIDs []imap.InternalMessageID, flagLowerCase string) []imap.InternalMessageID {
+	var result []imap.InternalMessageID
+
+	for _, id := range messageIDs {
+		msg, ok := state.snap.messages.get(id)
+		if !ok {
+			continue
+		}
+
+		if msg.flags.ContainsUnchecked(flagLowerCase) {
+			result = append(result, id)
+		}
+	}
+
+	return result
+}
+
+// filterSnapMessagesWithoutFlag returns the given messages whose snapshot entry
+// does not currently contain the given flag.
+func (state *State) filterSnapMessagesWithoutFlag(messageIDs []imap.InternalMessageID, flagLowerCase string) []imap.InternalMessageID {
+	var result []imap.InternalMessageID
+
+	for _, id := range messageIDs {
+		msg, ok := state.snap.messages.get(id)
+		if !ok {
+			continue
+		}
+
+		if !msg.flags.ContainsUnchecked(flagLowerCase) {
+			result = append(result, id)
+		}
+	}
+
+	return result
+}
+
+// assignMetadataModSeq allocates a single new mod-sequence per affected mailbox
+// for one flag-changing operation and stamps the affected rows. The origin
+// mailbox receives one value for the union of its deleted-only and global
+// changes; every other mailbox containing a globally changed message receives
+// its own value.
+func (state *State) assignMetadataModSeq(
+	ctx context.Context,
+	tx db.Transaction,
+	deletedChangedIDs []imap.InternalMessageID,
+	globalChangedIDSet map[imap.InternalMessageID]struct{},
+) (map[imap.InternalMailboxID]imap.ModSeq, error) {
+	if len(deletedChangedIDs) == 0 && len(globalChangedIDSet) == 0 {
+		return nil, nil
+	}
+
+	globalChangedIDs := make([]imap.InternalMessageID, 0, len(globalChangedIDSet))
+	for id := range globalChangedIDSet {
+		globalChangedIDs = append(globalChangedIDs, id)
+	}
+
+	originChangedSet := make(map[imap.InternalMessageID]struct{}, len(deletedChangedIDs)+len(globalChangedIDs))
+
+	for _, id := range deletedChangedIDs {
+		originChangedSet[id] = struct{}{}
+	}
+
+	for _, id := range globalChangedIDs {
+		originChangedSet[id] = struct{}{}
+	}
+
+	originChangedIDs := make([]imap.InternalMessageID, 0, len(originChangedSet))
+	for id := range originChangedSet {
+		originChangedIDs = append(originChangedIDs, id)
+	}
+
+	_, modSeqByMailbox, err := tx.AssignModSeqForMessageMetadata(
+		ctx,
+		state.snap.mboxID.InternalID,
+		originChangedIDs,
+		globalChangedIDs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if modSeq := modSeqByMailbox[state.snap.mboxID.InternalID]; modSeq != 0 {
+		state.snap.advanceHighestModSeq(modSeq)
+	}
+
+	return modSeqByMailbox, nil
 }
 
 type mailboxRemoteIDUpdateStateUpdate struct {

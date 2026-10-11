@@ -17,6 +17,7 @@ type snapMsg struct {
 	ID        db.MessageIDPair
 	UID       imap.UID
 	flags     imap.FlagSet
+	modSeq    imap.ModSeq
 	toExpunge bool
 }
 
@@ -48,7 +49,7 @@ func (list *snapMsgList) binarySearchByUID(uid imap.UID) (int, bool) {
 	return index, ok
 }
 
-func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet) error {
+func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet, modSeq imap.ModSeq) error {
 	if len(list.msg) > 0 && list.msg[len(list.msg)-1].UID >= msgUID {
 		return fmt.Errorf("UID-Last=%v UID-Msg=%v: %w", list.msg[len(list.msg)-1].UID, msgUID, ErrOutOfOrderUIDInsertion)
 	}
@@ -57,6 +58,7 @@ func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags i
 		ID:        msgID,
 		UID:       msgUID,
 		flags:     flags,
+		modSeq:    modSeq,
 		toExpunge: flags.ContainsUnchecked(imap.FlagDeletedLowerCase),
 	}
 
@@ -67,7 +69,7 @@ func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags i
 	return nil
 }
 
-func (list *snapMsgList) insertOutOfOrder(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet) {
+func (list *snapMsgList) insertOutOfOrder(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet, modSeq imap.ModSeq) {
 	index, ok := list.binarySearchByUID(msgUID)
 	if ok {
 		panic("Duplicate UID added")
@@ -77,6 +79,7 @@ func (list *snapMsgList) insertOutOfOrder(msgID db.MessageIDPair, msgUID imap.UI
 		ID:        msgID,
 		UID:       msgUID,
 		flags:     flags,
+		modSeq:    modSeq,
 		toExpunge: flags.ContainsUnchecked(imap.FlagDeletedLowerCase),
 	}
 

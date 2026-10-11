@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/ProtonMail/gluon/imap"
 	"github.com/ProtonMail/gluon/imap/command"
 	"github.com/ProtonMail/gluon/internal/contexts"
 	"github.com/ProtonMail/gluon/internal/response"
@@ -30,12 +31,25 @@ func (s *Session) handleStore(ctx context.Context, tag string, cmd *command.Stor
 		return nil, ErrReadOnly
 	}
 
+	// UNCHANGEDSINCE requires CONDSTORE to be enabled.
+	if cmd.UnchangedSince != nil && !s.state.CondStoreEnabled() {
+		return response.Bad(tag).WithError(errors.New("UNCHANGEDSINCE requires CONDSTORE to be enabled")), nil
+	}
+
 	flags, err := validateStoreFlags(cmd.Flags)
 	if err != nil {
 		return response.Bad(tag).WithError(err), nil
 	}
 
-	if err := mailbox.Store(ctx, cmd.SeqSet, cmd.Action, flags); errors.Is(err, state.ErrNoSuchMessage) {
+	var unchangedSince *imap.ModSeq
+
+	if cmd.UnchangedSince != nil {
+		v := imap.ModSeq(*cmd.UnchangedSince)
+		unchangedSince = &v
+	}
+
+	modified, err := mailbox.Store(ctx, cmd.SeqSet, cmd.Action, flags, unchangedSince)
+	if errors.Is(err, state.ErrNoSuchMessage) {
 		return response.Bad(tag).WithError(err), nil
 	} else if err != nil {
 		// A result of either a failed request (API unreachable), or the message does not exist on remote.
@@ -48,13 +62,47 @@ func (s *Session) handleStore(ctx context.Context, tag string, cmd *command.Stor
 		return nil, err
 	}
 
+	// CONDSTORE: messages that failed the UNCHANGEDSINCE predicate are reported
+	// with MODIFIED and the command finishes with a NO response.
+	if unchangedSince != nil && len(modified) != 0 {
+		modifiedSet := modifiedSeqSet(modified, contexts.IsUID(ctx))
+
+		return response.No(tag).
+			WithItems(response.ItemModified(modifiedSet)).
+			WithError(errors.New("conditional STORE failed, messages were modified")), nil
+	}
+
 	var items []response.Item
 
 	if mailbox.ExpungeIssued() {
 		items = append(items, response.ItemExpungeIssued())
 	}
 
+	// CONDSTORE: report the resulting mailbox watermark, including for a silent
+	// STORE which otherwise returns no per-message FETCH responses.
+	if s.state.CondStoreEnabled() {
+		items = append(items, response.ItemStoreModSeq(mailbox.HighestModSeq()))
+	}
+
 	return response.Ok(tag).
 		WithItems(items...).
 		WithMessage(okMessage(ctx)), nil
+}
+
+func modifiedSeqSet(modified []state.StoreModifiedMessage, asUID bool) string {
+	if asUID {
+		uids := make([]imap.UID, 0, len(modified))
+		for _, m := range modified {
+			uids = append(uids, m.UID)
+		}
+
+		return imap.NewSeqSetFromUID(uids).String()
+	}
+
+	seqs := make([]imap.SeqID, 0, len(modified))
+	for _, m := range modified {
+		seqs = append(seqs, m.Seq)
+	}
+
+	return imap.NewSeqSet(seqs).String()
 }

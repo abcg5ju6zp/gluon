@@ -12,7 +12,11 @@ type FetchAttribute interface {
 }
 
 type Fetch struct {
-	SeqSet     []SeqRange
+	SeqSet []SeqRange
+
+	// ChangedSince is non-nil for a CONDSTORE CHANGEDSINCE fetch modifier.
+	ChangedSince *uint64
+
 	Attributes []FetchAttribute
 }
 
@@ -27,8 +31,9 @@ func (f Fetch) SanitizedString() string {
 type FetchCommandParser struct{}
 
 func (FetchCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
-	//fetch           = "FETCH" SP sequence-set SP ("ALL" / "FULL" / "FAST" /
-	//                  fetch-att / "(" fetch-att *(SP fetch-att) ")")
+	//fetch           = "FETCH" SP sequence-set [SP "CHANGEDSINCE" SP mod-seq]
+	//                  SP ("ALL" / "FULL" / "FAST" / fetch-att /
+	//                  "(" fetch-att *(SP fetch-att) ")")
 	if err := p.Consume(rfcparser.TokenTypeSP, "expected space after command"); err != nil {
 		return nil, err
 	}
@@ -38,45 +43,93 @@ func (FetchCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
 		return nil, err
 	}
 
-	if err := p.Consume(rfcparser.TokenTypeSP, "expected space after sequence set"); err != nil {
+	var changedSince *uint64
+
+	// Optional CONDSTORE CHANGEDSINCE modifier.
+	ok, err := p.Matches(rfcparser.TokenTypeSP)
+	if err != nil {
 		return nil, err
 	}
 
 	var attributes []FetchAttribute
 
+	if !ok {
+		return nil, p.MakeError("expected space after sequence set")
+	}
+
 	if p.Check(rfcparser.TokenTypeLParen) {
 		// Multiple list of attributes.
-		attr, err := parseFetchAttributes(p)
+		attributes, err = parseFetchAttributes(p)
 		if err != nil {
 			return nil, err
 		}
 
-		attributes = attr
-	} else {
-		// One single attribute.
-		attribute, err := parseFetchAttributeName(p)
+		return &Fetch{SeqSet: seqSet, ChangedSince: changedSince, Attributes: attributes}, nil
+	}
+
+	attribute, err := parseFetchAttributeName(p)
+	if err != nil {
+		return nil, err
+	}
+
+	if attribute.Value == "changedsince" {
+		if err := p.Consume(rfcparser.TokenTypeSP, "expected space after CHANGEDSINCE"); err != nil {
+			return nil, err
+		}
+
+		modSeq, err := p.ParseNumber()
 		if err != nil {
 			return nil, err
 		}
 
-		switch attribute.Value {
-		case "all":
-			attributes = []FetchAttribute{&FetchAttributeAll{}}
-		case "full":
-			attributes = []FetchAttribute{&FetchAttributeFull{}}
-		case "fast":
-			attributes = []FetchAttribute{&FetchAttributeFast{}}
-		default:
-			attr, err := handleFetchAttribute(attribute, p)
+		modSeq64 := uint64(modSeq)
+		changedSince = &modSeq64
+
+		if err := p.Consume(rfcparser.TokenTypeSP, "expected space after CHANGEDSINCE value"); err != nil {
+			return nil, err
+		}
+
+		if p.Check(rfcparser.TokenTypeLParen) {
+			attributes, err = parseFetchAttributes(p)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			lastAttribute, err := parseFetchAttributeName(p)
 			if err != nil {
 				return nil, err
 			}
 
-			attributes = []FetchAttribute{attr}
+			attributes, err = parseFetchMacroOrAttribute(p, lastAttribute)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		attributes, err = parseFetchMacroOrAttribute(p, attribute)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	return &Fetch{SeqSet: seqSet, Attributes: attributes}, nil
+	return &Fetch{SeqSet: seqSet, ChangedSince: changedSince, Attributes: attributes}, nil
+}
+func parseFetchMacroOrAttribute(p *rfcparser.Parser, attribute rfcparser.String) ([]FetchAttribute, error) {
+	switch attribute.Value {
+	case "all":
+		return []FetchAttribute{&FetchAttributeAll{}}, nil
+	case "full":
+		return []FetchAttribute{&FetchAttributeFull{}}, nil
+	case "fast":
+		return []FetchAttribute{&FetchAttributeFast{}}, nil
+	default:
+		attr, err := handleFetchAttribute(attribute, p)
+		if err != nil {
+			return nil, err
+		}
+
+		return []FetchAttribute{attr}, nil
+	}
 }
 
 func parseFetchAttributeName(p *rfcparser.Parser) (rfcparser.String, error) {
@@ -161,6 +214,8 @@ func handleFetchAttribute(name rfcparser.String, p *rfcparser.Parser) (FetchAttr
 		return &FetchAttributeBodyStructure{}, nil
 	case "uid":
 		return &FetchAttributeUID{}, nil
+	case "modseq":
+		return &FetchAttributeModSeq{}, nil
 	case "rfc":
 		return handleRFC822FetchAttribute(p)
 	case "body":

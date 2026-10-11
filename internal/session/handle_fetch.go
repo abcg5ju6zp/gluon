@@ -21,6 +21,19 @@ func (s *Session) handleFetch(ctx context.Context, tag string, cmd *command.Fetc
 		defer profiling.Stop(ctx, profiling.CmdTypeFetch)
 	}
 
+	// CHANGEDSINCE and MODSEQ require CONDSTORE to be enabled.
+	if !s.state.CondStoreEnabled() {
+		if cmd.ChangedSince != nil {
+			return response.Bad(tag).WithError(errors.New("CHANGEDSINCE requires CONDSTORE to be enabled")), nil
+		}
+
+		for _, attribute := range cmd.Attributes {
+			if _, ok := attribute.(*command.FetchAttributeModSeq); ok {
+				return response.Bad(tag).WithError(errors.New("MODSEQ fetch attribute requires CONDSTORE to be enabled")), nil
+			}
+		}
+	}
+
 	if err := mailbox.Fetch(ctx, cmd, ch); errors.Is(err, state.ErrNoSuchMessage) {
 		return response.Bad(tag).WithError(err), nil
 	} else if err != nil {

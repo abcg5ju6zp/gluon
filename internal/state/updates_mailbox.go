@@ -35,8 +35,11 @@ func MoveMessagesFromMailbox(
 		return nil, nil, err
 	}
 
+	var removedModSeq imap.ModSeq
+
 	if mboxFromID != mboxToID && removeOldMessages {
-		if err := tx.RemoveMessagesFromMailbox(ctx, mboxFromID, messageIDsInternal); err != nil {
+		removedModSeq, err = tx.RemoveMessagesFromMailbox(ctx, mboxFromID, messageIDsInternal)
+		if err != nil {
 			return nil, nil, err
 		}
 	}
@@ -52,14 +55,14 @@ func MoveMessagesFromMailbox(
 			return newExists(db.MessageIDPair{
 				InternalID: uid.InternalID,
 				RemoteID:   uid.RemoteID,
-			}, uid.UID, uid.GetFlagSet())
+			}, uid.UID, uid.GetFlagSet(), uid.ModSeq)
 		})
 		stateUpdates = append(stateUpdates, newExistsStateUpdateWithExists(mboxToID, responders, s))
 	}
 
 	if removeOldMessages {
 		for _, messageID := range messageIDsInternal {
-			stateUpdates = append(stateUpdates, NewMessageIDAndMailboxIDResponderStateUpdate(messageID, mboxFromID, NewExpunge(messageID)))
+			stateUpdates = append(stateUpdates, NewMessageIDAndMailboxIDResponderStateUpdate(messageID, mboxFromID, NewExpunge(messageID, removedModSeq)))
 		}
 	}
 
@@ -95,7 +98,7 @@ func AddMessagesToMailbox(ctx context.Context,
 		return newExists(db.MessageIDPair{
 			InternalID: uid.InternalID,
 			RemoteID:   uid.RemoteID,
-		}, uid.UID, uid.GetFlagSet())
+		}, uid.UID, uid.GetFlagSet(), uid.ModSeq)
 	})
 
 	return messageUIDs, newExistsStateUpdateWithExists(mboxID, responders, s), nil
@@ -103,14 +106,18 @@ func AddMessagesToMailbox(ctx context.Context,
 
 // RemoveMessagesFromMailbox removes the messages from the given mailbox.
 func RemoveMessagesFromMailbox(ctx context.Context, tx db.Transaction, mboxID imap.InternalMailboxID, messageIDs []imap.InternalMessageID) ([]Update, error) {
+	var modSeq imap.ModSeq
+
 	if len(messageIDs) > 0 {
-		if err := tx.RemoveMessagesFromMailbox(ctx, mboxID, messageIDs); err != nil {
+		var err error
+		modSeq, err = tx.RemoveMessagesFromMailbox(ctx, mboxID, messageIDs)
+		if err != nil {
 			return nil, err
 		}
 	}
 
 	stateUpdates := xslices.Map(messageIDs, func(id imap.InternalMessageID) Update {
-		return NewMessageIDAndMailboxIDResponderStateUpdate(id, mboxID, NewExpunge(id))
+		return NewMessageIDAndMailboxIDResponderStateUpdate(id, mboxID, NewExpunge(id, modSeq))
 	})
 
 	return stateUpdates, nil

@@ -8,6 +8,7 @@ import (
 
 type Examine struct {
 	Mailbox string
+	Params  *SelectParams
 }
 
 func (l Examine) String() string {
@@ -21,7 +22,7 @@ func (l Examine) SanitizedString() string {
 type ExamineCommandParser struct{}
 
 func (ExamineCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
-	// examine          = "EXAMINE" SP mailbox
+	// examine          = "EXAMINE" SP mailbox [select-params]
 	if err := p.Consume(rfcparser.TokenTypeSP, "expected space after command"); err != nil {
 		return nil, err
 	}
@@ -31,7 +32,13 @@ func (ExamineCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
 		return nil, err
 	}
 
+	params, err := parseSelectParams(p)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Examine{
 		Mailbox: mailbox.Value,
+		Params:  params,
 	}, nil
 }

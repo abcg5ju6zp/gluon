@@ -41,6 +41,19 @@ func (m *Mailbox) Fetch(ctx context.Context, cmd *command.Fetch, ch chan respons
 		return err
 	}
 
+	// CONDSTORE CHANGEDSINCE: only return messages with a greater mod-sequence.
+	if cmd.ChangedSince != nil {
+		filtered := make([]snapMsgWithSeq, 0, len(snapMessages))
+
+		for _, msg := range snapMessages {
+			if msg.modSeq > imap.ModSeq(*cmd.ChangedSince) {
+				filtered = append(filtered, msg)
+			}
+		}
+
+		snapMessages = filtered
+	}
+
 	operations := make([]func(snapMsgWithSeq, *db.Message, *fetchContext) (response.Item, error), 0, len(cmd.Attributes))
 
 	var (
@@ -65,6 +78,8 @@ func (m *Mailbox) Fetch(ctx context.Context, cmd *command.Fetch, ch chan respons
 			wantUID = true
 
 			operations = append(operations, fetchUID)
+		case *command.FetchAttributeModSeq:
+			operations = append(operations, fetchModSeq)
 		case *command.FetchAttributeRFC822:
 			setSeen = true
 			needsLiteral = true
@@ -239,6 +254,10 @@ func fetchBodyStructure(_ snapMsgWithSeq, message *db.Message, _ *fetchContext) 
 
 func fetchUID(msg snapMsgWithSeq, _ *db.Message, _ *fetchContext) (response.Item, error) {
 	return response.ItemUID(msg.UID), nil
+}
+
+func fetchModSeq(msg snapMsgWithSeq, _ *db.Message, _ *fetchContext) (response.Item, error) {
+	return response.ItemModSeq(msg.modSeq), nil
 }
 
 func fetchAttributeBodySection(attribute *command.FetchAttributeBodySection, fc *fetchContext) (response.Item, error) {

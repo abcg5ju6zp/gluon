@@ -88,6 +88,7 @@ func NewParser(s *rfcparser.Scanner, options ...Option) *Parser {
 		"move":        &MoveCommandParser{},
 		"uid":         NewUIDCommandParser(),
 		"id":          &IDCommandParser{},
+		"enable":      &EnableCommandParser{},
 	}
 
 	if !builder.disableIMAPAuthenticate {

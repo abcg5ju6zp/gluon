@@ -85,11 +85,12 @@ type MailboxAttr struct {
 }
 
 type Mailbox struct {
-	ID          imap.InternalMailboxID
-	RemoteID    imap.MailboxID
-	Name        string
-	UIDValidity imap.UID
-	Subscribed  bool
+	ID            imap.InternalMailboxID
+	RemoteID      imap.MailboxID
+	Name          string
+	UIDValidity   imap.UID
+	Subscribed    bool
+	HighestModSeq imap.ModSeq
 }
 
 type MailboxWithAttr struct {

@@ -55,6 +55,22 @@ type MailboxReadOps interface {
 
 	GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID imap.InternalMailboxID) ([]SnapshotMessageResult, error)
 
+	// GetMailboxMessagesChangedSince returns the messages of the mailbox whose
+	// per-mailbox mod-sequence is strictly greater than since, ordered by UID.
+	GetMailboxMessagesChangedSince(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]SnapshotMessageResult, error)
+
+	// GetMailboxHighestModSeq returns the current highest mod-sequence of the mailbox.
+	GetMailboxHighestModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error)
+
+	// GetVanishedUIDsAfterModSeq returns the UIDs recorded as vanished with a
+	// mod-sequence strictly greater than since.
+	GetVanishedUIDsAfterModSeq(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]imap.UID, error)
+
+	// GetVanishedHistoryPrunedModSeq returns the highest mod-sequence for
+	// which vanished history may no longer be complete. A value of zero means
+	// no history has ever been pruned.
+	GetVanishedHistoryPrunedModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error)
+
 	MailboxTranslateRemoteIDs(ctx context.Context, mboxIDs []imap.MailboxID) ([]imap.InternalMailboxID, error)
 
 	MailboxFilterContains(ctx context.Context, mboxID imap.InternalMailboxID, messageIDs []MessageIDPair) ([]imap.InternalMessageID, error)
@@ -92,7 +108,10 @@ type MailboxWriteOps interface {
 
 	AddMessagesToMailbox(ctx context.Context, mboxID imap.InternalMailboxID, messageIDs []MessageIDPair) ([]UIDWithFlags, error)
 
-	RemoveMessagesFromMailbox(ctx context.Context, mboxID imap.InternalMailboxID, messageIDs []imap.InternalMessageID) error
+	// RemoveMessagesFromMailbox deletes messages from the mailbox's per-mailbox
+	// table without hard deleting the message. The returned mod-sequence is the
+	// new highest watermark allocated for the mailbox.
+	RemoveMessagesFromMailbox(ctx context.Context, mboxID imap.InternalMailboxID, messageIDs []imap.InternalMessageID) (imap.ModSeq, error)
 
 	ClearRecentFlagInMailboxOnMessage(ctx context.Context, mboxID imap.InternalMailboxID, messageID imap.InternalMessageID) error
 
@@ -108,6 +127,20 @@ type MailboxWriteOps interface {
 
 	SetMailboxUIDValidity(ctx context.Context, mboxID imap.InternalMailboxID, uidValidity imap.UID) error
 
+	// AssignModSeqForMessageMetadata allocates the next mod-sequence of every
+	// mailbox affected by a (global) message metadata change:
+	//   - the origin mailbox gets a single new mod-sequence if originChangedIDs
+	//     is non-empty and its rows are stamped with it;
+	//   - every other mailbox containing any of globalChangedIDs gets its own
+	//     new mod-sequence and the affected rows are stamped with it.
+	// It returns the origin mod-sequence (0 if none) and a map of every stamped
+	// mailbox (including the origin) to its new mod-sequence.
+	AssignModSeqForMessageMetadata(ctx context.Context,
+		originMboxID imap.InternalMailboxID,
+		originChangedIDs []imap.InternalMessageID,
+		globalChangedIDs []imap.InternalMessageID,
+	) (originModSeq imap.ModSeq, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq, err error)
+
 	AddFlagsToAllMailboxes(ctx context.Context, flags ...string) error
 
 	AddPermFlagsToAllMailboxes(ctx context.Context, flags ...string) error
@@ -120,6 +153,7 @@ type SnapshotMessageResult struct {
 	Recent     bool                   `json:"recent"`
 	Deleted    bool                   `json:"deleted"`
 	Flags      string                 `json:"flags"`
+	ModSeq     imap.ModSeq            `json:"mod_seq"`
 }
 
 func (msg *SnapshotMessageResult) GetFlagSet() imap.FlagSet {
@@ -150,6 +184,7 @@ type UIDWithFlags struct {
 	Recent     bool                   `json:"recent"`
 	Deleted    bool                   `json:"deleted"`
 	Flags      string                 `json:"flags"`
+	ModSeq     imap.ModSeq            `json:"mod_seq"`
 }
 
 func (u *UIDWithFlags) GetFlagSet() imap.FlagSet {

@@ -115,6 +115,10 @@ func (m *Mailbox) UIDValidity() imap.UID {
 	return m.uidValidity
 }
 
+func (m *Mailbox) HighestModSeq() imap.ModSeq {
+	return m.snap.HighestModSeq()
+}
+
 func (m *Mailbox) Subscribed() bool {
 	return m.subscribed
 }
@@ -405,13 +409,44 @@ func (m *Mailbox) Move(ctx context.Context, seq []command.SeqRange, name string)
 	return res, nil
 }
 
-func (m *Mailbox) Store(ctx context.Context, seqSet []command.SeqRange, action command.StoreAction, flags imap.FlagSet) error {
+// StoreModifiedMessage identifies a message that failed an UNCHANGEDSINCE
+// conditional STORE.
+type StoreModifiedMessage struct {
+	Seq imap.SeqID
+	UID imap.UID
+}
+
+// Store changes the flags of the messages matched by the sequence set. When
+// unchangedSince is non-nil (CONDSTORE UNCHANGEDSINCE), only messages whose
+// mod-sequence is not greater than that value are modified; the messages that
+// fail the condition are returned so the caller can report them via MODIFIED.
+func (m *Mailbox) Store(ctx context.Context, seqSet []command.SeqRange, action command.StoreAction, flags imap.FlagSet, unchangedSince *imap.ModSeq) ([]StoreModifiedMessage, error) {
 	messages, err := m.snap.getMessagesInRange(ctx, seqSet)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return stateDBWrite(ctx, m.state, func(ctx context.Context, tx db.Transaction) ([]Update, error) {
+	var modified []StoreModifiedMessage
+
+	if unchangedSince != nil {
+		var unchanged []snapMsgWithSeq
+
+		for _, msg := range messages {
+			if msg.modSeq > *unchangedSince {
+				modified = append(modified, StoreModifiedMessage{Seq: msg.Seq, UID: msg.UID})
+			} else {
+				unchanged = append(unchanged, msg)
+			}
+		}
+
+		messages = unchanged
+	}
+
+	if len(messages) == 0 {
+		return modified, nil
+	}
+
+	if err := stateDBWrite(ctx, m.state, func(ctx context.Context, tx db.Transaction) ([]Update, error) {
 		switch action {
 		case command.StoreActionAddFlags:
 			return m.state.actionAddMessageFlags(ctx, tx, messages, flags)
@@ -424,7 +459,11 @@ func (m *Mailbox) Store(ctx context.Context, seqSet []command.SeqRange, action c
 		}
 
 		return nil, fmt.Errorf("unknown flag action")
-	})
+	}); err != nil {
+		return modified, err
+	}
+
+	return modified, nil
 }
 
 func (m *Mailbox) Expunge(ctx context.Context, seq []command.SeqRange) error {

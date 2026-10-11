@@ -40,7 +40,7 @@ type MessageWriteOps interface {
 
 	CreateMessages(ctx context.Context, reqs ...*CreateMessageReq) error
 
-	CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.InternalMailboxID, req *CreateMessageReq) (imap.UID, imap.FlagSet, error)
+	CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.InternalMailboxID, req *CreateMessageReq) (imap.UID, imap.FlagSet, imap.ModSeq, error)
 
 	MarkMessageAsDeleted(ctx context.Context, id imap.InternalMessageID) error
 

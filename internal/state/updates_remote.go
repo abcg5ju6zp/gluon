@@ -11,18 +11,20 @@ import (
 
 type RemoteAddMessageFlagsStateUpdate struct {
 	MessageIDStateFilter
-	flag string
+	flag            string
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func NewRemoteAddMessageFlagsStateUpdate(messageID imap.InternalMessageID, flag string) Update {
+func NewRemoteAddMessageFlagsStateUpdate(messageID imap.InternalMessageID, flag string, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq) Update {
 	return &RemoteAddMessageFlagsStateUpdate{
 		MessageIDStateFilter: MessageIDStateFilter{MessageID: messageID},
 		flag:                 flag,
+		modSeqByMailbox:       modSeqByMailbox,
 	}
 }
 
 func (u *RemoteAddMessageFlagsStateUpdate) Apply(ctx context.Context, tx db.Transaction, s *State) error {
-	return s.PushResponder(ctx, tx, NewFetch(u.MessageID, imap.NewFlagSet(u.flag), contexts.IsUID(ctx), contexts.IsSilent(ctx), false, FetchFlagOpAdd))
+	return s.PushResponder(ctx, tx, NewFetch(u.MessageID, imap.NewFlagSet(u.flag), contexts.IsUID(ctx), contexts.IsSilent(ctx), false, FetchFlagOpAdd, u.modSeqByMailbox))
 }
 
 func (u *RemoteAddMessageFlagsStateUpdate) String() string {
@@ -31,18 +33,20 @@ func (u *RemoteAddMessageFlagsStateUpdate) String() string {
 
 type RemoteRemoveMessageFlagsStateUpdate struct {
 	MessageIDStateFilter
-	flag string
+	flag            string
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func NewRemoteRemoveMessageFlagsStateUpdate(messageID imap.InternalMessageID, flag string) Update {
+func NewRemoteRemoveMessageFlagsStateUpdate(messageID imap.InternalMessageID, flag string, modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq) Update {
 	return &RemoteRemoveMessageFlagsStateUpdate{
 		MessageIDStateFilter: MessageIDStateFilter{MessageID: messageID},
 		flag:                 flag,
+		modSeqByMailbox:       modSeqByMailbox,
 	}
 }
 
 func (u *RemoteRemoveMessageFlagsStateUpdate) Apply(ctx context.Context, tx db.Transaction, s *State) error {
-	return s.PushResponder(ctx, tx, NewFetch(u.MessageID, imap.NewFlagSet(u.flag), contexts.IsUID(ctx), contexts.IsSilent(ctx), false, FetchFlagOpRem))
+	return s.PushResponder(ctx, tx, NewFetch(u.MessageID, imap.NewFlagSet(u.flag), contexts.IsUID(ctx), contexts.IsSilent(ctx), false, FetchFlagOpRem, u.modSeqByMailbox))
 }
 
 func (u *RemoteRemoveMessageFlagsStateUpdate) String() string {

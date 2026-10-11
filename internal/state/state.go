@@ -40,6 +40,15 @@ type State struct {
 	snap *snapshot
 	ro   bool
 
+	// condstoreEnabled indicates that CONDSTORE was enabled for this connection
+	// (via ENABLE CONDSTORE or a CONDSTORE SELECT parameter). MODSEQ is then
+	// included in FETCH responses and STORE tagged responses.
+	condstoreEnabled bool
+
+	// qresyncEnabled indicates that QRESYNC was enabled for this connection
+	// (via ENABLE QRESYNC). Expunges are then reported as VANISHED responses.
+	qresyncEnabled bool
+
 	doneCh chan struct{}
 
 	updatesQueue *async.QueuedChannel[Update]
@@ -169,72 +178,74 @@ func (state *State) List(ctx context.Context, ref, pattern string, lsub bool, fn
 	})
 }
 
-func (state *State) Select(ctx context.Context, name string, fn func(*Mailbox) error) error {
-	mbox, err := stateDBReadResult(ctx, state, func(ctx context.Context, client db.ReadOnly) (*db.Mailbox, error) {
-		return client.GetMailboxByName(ctx, name)
-	})
-	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
-			return ErrNoSuchMailbox
-		}
-
-		return err
-	}
-
-	if state.snap != nil {
-		if err := state.close(); err != nil {
-			return err
-		}
-	}
-
-	snap, err := stateDBReadResult(ctx, state, func(ctx context.Context, client db.ReadOnly) (*snapshot, error) {
-		return newSnapshot(ctx, state, client, mbox)
-	})
-	if err != nil {
-		return err
-	}
-
-	if err := stateDBWrite(ctx, state, func(ctx context.Context, tx db.Transaction) ([]Update, error) {
-		return nil, tx.ClearRecentFlagsInMailbox(ctx, mbox.ID)
-	}); err != nil {
-		return err
-	}
-
-	state.snap = snap
-	state.ro = false
-
-	return fn(newMailbox(mbox, state, state.snap))
+func (state *State) Select(ctx context.Context, name string, qresync *QResyncParameters, fn func(*Mailbox) error) (*QResyncResult, error) {
+	return state.selectOrExamine(ctx, name, false, qresync, fn)
 }
 
-func (state *State) Examine(ctx context.Context, name string, fn func(*Mailbox) error) error {
+func (state *State) Examine(ctx context.Context, name string, qresync *QResyncParameters, fn func(*Mailbox) error) (*QResyncResult, error) {
+	return state.selectOrExamine(ctx, name, true, qresync, fn)
+}
+
+func (state *State) selectOrExamine(ctx context.Context, name string, readOnly bool, qresync *QResyncParameters, fn func(*Mailbox) error) (*QResyncResult, error) {
 	mbox, err := stateDBReadResult(ctx, state, func(ctx context.Context, client db.ReadOnly) (*db.Mailbox, error) {
 		return client.GetMailboxByName(ctx, name)
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
-			return ErrNoSuchMailbox
+			return nil, ErrNoSuchMailbox
 		}
 
-		return err
+		return nil, err
 	}
 
 	if state.snap != nil {
 		if err := state.close(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	snap, err := stateDBReadResult(ctx, state, func(ctx context.Context, client db.ReadOnly) (*snapshot, error) {
-		return newSnapshot(ctx, state, client, mbox)
-	})
-	if err != nil {
-		return err
+	type selectData struct {
+		snap    *snapshot
+		qresync *QResyncResult
 	}
 
-	state.snap = snap
-	state.ro = true
+	data, err := stateDBReadResult(ctx, state, func(ctx context.Context, client db.ReadOnly) (selectData, error) {
+		snap, err := newSnapshot(ctx, state, client, mbox)
+		if err != nil {
+			return selectData{}, err
+		}
 
-	return fn(newMailbox(mbox, state, state.snap))
+		var result *QResyncResult
+
+		if qresync != nil {
+			result, err = state.computeQResync(ctx, client, mbox, snap, qresync)
+			if err != nil {
+				return selectData{}, err
+			}
+		}
+
+		return selectData{snap: snap, qresync: result}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if !readOnly {
+		if err := stateDBWrite(ctx, state, func(ctx context.Context, tx db.Transaction) ([]Update, error) {
+			return nil, tx.ClearRecentFlagsInMailbox(ctx, mbox.ID)
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	state.snap = data.snap
+	state.ro = readOnly
+
+	if err := fn(newMailbox(mbox, state, state.snap)); err != nil {
+		return data.qresync, err
+	}
+
+	return data.qresync, nil
 }
 
 func (state *State) Create(ctx context.Context, name string) error {
@@ -568,6 +579,23 @@ func (state *State) Selected(ctx context.Context, fn func(*Mailbox) error) error
 
 func (state *State) IsSelected() bool {
 	return state.snap != nil
+}
+
+func (state *State) EnableCondStore() {
+	state.condstoreEnabled = true
+}
+
+func (state *State) EnableQResync() {
+	state.qresyncEnabled = true
+	state.condstoreEnabled = true
+}
+
+func (state *State) CondStoreEnabled() bool {
+	return state.condstoreEnabled
+}
+
+func (state *State) QResyncEnabled() bool {
+	return state.qresyncEnabled
 }
 
 func (state *State) SetConnMetadataKeyValue(key string, value any) {

@@ -49,6 +49,9 @@ func (s *Session) handleStatus(ctx context.Context, tag string, cmd *command.Sta
 
 			case command.StatusAttributeUnseen:
 				items = append(items, response.ItemUnseen(uint32(mailbox.GetMessagesWithoutFlagCount(imap.FlagSeen))))
+
+			case command.StatusAttributeHighestModSeq:
+				items = append(items, response.ItemHighestModSeq(mailbox.HighestModSeq()))
 			}
 		}
 

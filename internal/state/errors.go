@@ -14,6 +14,16 @@ var (
 	ErrOperationNotAllowed            = errors.New("operation not allowed")
 	ErrMailboxNameBeginsWithSeparator = errors.New("invalid mailbox name: begins with hierarchy separator")
 	ErrMailboxNameAdjacentSeparator   = errors.New("invalid mailbox name: has adjacent hierarchy separators")
+
+	// ErrQResyncModSeqTooHigh is returned when a QRESYNC request provides a
+	// last known mod-sequence greater than the mailbox's HIGHESTMODSEQ. Such a
+	// state is impossible and must be rejected.
+	ErrQResyncModSeqTooHigh = errors.New("client provided QRESYNC mod-sequence is higher than the mailbox HIGHESTMODSEQ")
+
+	// ErrQResyncHistoryPruned is returned when the server can no longer provide
+	// a complete incremental response because the required vanished change
+	// history has been pruned. The client must perform a full resynchronization.
+	ErrQResyncHistoryPruned = errors.New("modification history for this mailbox has been pruned, full resynchronization required")
 )
 
 func IsStateError(err error) bool {
@@ -25,5 +35,7 @@ func IsStateError(err error) bool {
 		errors.Is(err, ErrSessionNotSelected) ||
 		errors.Is(err, ErrOperationNotAllowed) ||
 		errors.Is(err, ErrMailboxNameBeginsWithSeparator) ||
-		errors.Is(err, ErrMailboxNameAdjacentSeparator)
+		errors.Is(err, ErrMailboxNameAdjacentSeparator) ||
+		errors.Is(err, ErrQResyncModSeqTooHigh) ||
+		errors.Is(err, ErrQResyncHistoryPruned)
 }

@@ -64,10 +64,11 @@ type exists struct {
 	messageID  db.MessageIDPair
 	messageUID imap.UID
 	flags      imap.FlagSet
+	modSeq     imap.ModSeq
 }
 
-func newExists(messageID db.MessageIDPair, messageUID imap.UID, flags imap.FlagSet) *exists {
-	return &exists{messageID: messageID, messageUID: messageUID, flags: flags}
+func newExists(messageID db.MessageIDPair, messageUID imap.UID, flags imap.FlagSet, modSeq imap.ModSeq) *exists {
+	return &exists{messageID: messageID, messageUID: messageUID, flags: flags, modSeq: modSeq}
 }
 
 func (u *exists) String() string {
@@ -105,16 +106,18 @@ func (u *targetedExists) handle(ctx context.Context, snap *snapshot, stateID Sta
 	}
 
 	if u.originStateSet && u.originStateID == stateID {
-		if err := snap.appendMessage(u.resp.messageID, u.resp.messageUID, flags); err != nil {
+		if err := snap.appendMessage(u.resp.messageID, u.resp.messageUID, flags, u.resp.modSeq); err != nil {
 			// No events reported so far.
 			reporter.ExceptionWithContext(ctx, "Failed to append message to snap via targetedExists", reporter.Context{"error": err})
 			return nil, nil, err
 		}
 	} else {
-		if err := snap.appendMessageFromOtherState(u.resp.messageID, u.resp.messageUID, flags); err != nil {
+		if err := snap.appendMessageFromOtherState(u.resp.messageID, u.resp.messageUID, flags, u.resp.modSeq); err != nil {
 			return nil, nil, err
 		}
 	}
+
+	snap.advanceHighestModSeq(u.resp.modSeq)
 
 	res := []response.Response{response.Exists().WithCount(imap.SeqID(uint32(snap.messages.len())))}
 
@@ -244,11 +247,13 @@ func (e *ExistsStateUpdate) String() string {
 
 type expunge struct {
 	messageID imap.InternalMessageID
+	modSeq    imap.ModSeq
 }
 
-func NewExpunge(messageID imap.InternalMessageID) *expunge {
+func NewExpunge(messageID imap.InternalMessageID, modSeq imap.ModSeq) *expunge {
 	return &expunge{
 		messageID: messageID,
+		modSeq:    modSeq,
 	}
 }
 
@@ -262,13 +267,27 @@ func (u *expunge) handle(ctx context.Context, snap *snapshot, _ StateID) ([]resp
 		return nil, nil, err
 	}
 
+	uid, err := snap.getMessageUID(u.messageID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if err := snap.expungeMessage(u.messageID); err != nil {
 		return nil, nil, err
 	}
 
+	// The mailbox watermark advances even when EXPUNGE responses are
+	// suppressed (e.g. CLOSE), so the snapshot stays consistent with the DB.
+	snap.advanceHighestModSeq(u.modSeq)
+
 	// When handling a CLOSE command, EXPUNGE responses are not sent.
 	if contexts.IsClose(ctx) {
 		return nil, nil, nil
+	}
+
+	// QRESYNC enabled sessions receive VANISHED (RFC 7162) instead of EXPUNGE.
+	if snap.state.qresyncEnabled {
+		return []response.Response{response.Vanished(false, imap.NewSeqSetFromUID([]imap.UID{uid}))}, nil, nil
 	}
 
 	return []response.Response{response.Expunge(seq)}, nil, nil
@@ -298,9 +317,20 @@ type fetch struct {
 	asUID                    bool
 	asSilent                 bool
 	cameFromDifferentMailbox bool
+
+	// modSeqByMailbox contains the new per-mailbox mod-sequences allocated by
+	// the originating write transaction. The value for the snapshot's mailbox
+	// (if present) is reported as MODSEQ and stored in the snapshot.
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq
 }
 
-func NewFetch(messageID imap.InternalMessageID, flags imap.FlagSet, asUID, asSilent, cameFromDifferentMailbox bool, fetchFlagOp int) *fetch {
+func NewFetch(
+	messageID imap.InternalMessageID,
+	flags imap.FlagSet,
+	asUID, asSilent, cameFromDifferentMailbox bool,
+	fetchFlagOp int,
+	modSeqByMailbox map[imap.InternalMailboxID]imap.ModSeq,
+) *fetch {
 	return &fetch{
 		messageID:                messageID,
 		flags:                    flags,
@@ -308,6 +338,7 @@ func NewFetch(messageID imap.InternalMessageID, flags imap.FlagSet, asUID, asSil
 		asSilent:                 asSilent,
 		fetchFlagOp:              fetchFlagOp,
 		cameFromDifferentMailbox: cameFromDifferentMailbox,
+		modSeqByMailbox:          modSeqByMailbox,
 	}
 }
 
@@ -348,6 +379,15 @@ func (u *fetch) handle(_ context.Context, snap *snapshot, _ StateID) ([]response
 		return nil, nil, err
 	}
 
+	modSeq, hasModSeq := u.modSeqByMailbox[snap.mboxID.InternalID]
+	if hasModSeq {
+		if err := snap.setMessageModSeq(u.messageID, modSeq); err != nil {
+			return nil, nil, err
+		}
+
+		snap.advanceHighestModSeq(modSeq)
+	}
+
 	// If the flags are unchanged, we don't send a FETCH response.
 	if curFlags.Equals(newFlags) {
 		return nil, nil, nil
@@ -368,6 +408,11 @@ func (u *fetch) handle(_ context.Context, snap *snapshot, _ StateID) ([]response
 		}
 
 		items = append(items, response.ItemUID(uid))
+	}
+
+	// CONDSTORE enabled sessions receive the message mod-sequence.
+	if snap.state.condstoreEnabled && hasModSeq {
+		items = append(items, response.ItemModSeq(modSeq))
 	}
 
 	seq, err := snap.getMessageSeq(u.messageID)

@@ -13,6 +13,7 @@ import (
 	"github.com/ProtonMail/gluon/internal/db_impl/sqlite3/utils"
 	v1 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v1"
 	v2 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v2"
+	v4 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v4"
 	"github.com/bradenaw/juniper/xmaps"
 	"github.com/bradenaw/juniper/xslices"
 )
@@ -261,7 +262,7 @@ func (r readOps) GetMailboxMessageCountAndUID(ctx context.Context, mboxID imap.I
 
 func (r readOps) GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID imap.InternalMailboxID) ([]db.SnapshotMessageResult, error) {
 	query := fmt.Sprintf("SELECT `m`.`%[1]v`, GROUP_CONCAT(`f`.`%[2]v`) AS `flags`, `m`.`%[3]v`, `m`.`%[4]v`, "+
-		"`m`.`%[5]v`, `m`.`%[6]v` FROM %[9]v AS m "+
+		"`m`.`%[5]v`, `m`.`%[10]v`, `m`.`%[6]v` FROM %[9]v AS m "+
 		"LEFT JOIN `%[7]v` AS f ON `f`.`%[8]v` = `m`.`%[6]v` "+
 		"GROUP BY `m`.`%[6]v` ORDER BY `m`.`%[5]v`",
 		v1.MailboxMessagesFieldMessageRemoteID,
@@ -273,13 +274,14 @@ func (r readOps) GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID ima
 		v1.MessageFlagsTableName,
 		v1.MessageFlagsFieldMessageID,
 		v1.MailboxMessageTableName(mboxID),
+		v4.MailboxMessagesFieldModSeq,
 	)
 
 	return utils.MapQueryRowsFn(ctx, r.qw, query, func(scanner utils.RowScanner) (db.SnapshotMessageResult, error) {
 		var r db.SnapshotMessageResult
 		var flags sql.NullString
 
-		if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID); err != nil {
+		if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.ModSeq, &r.InternalID); err != nil {
 			return db.SnapshotMessageResult{}, err
 		}
 
@@ -350,9 +352,9 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 
 	for _, chunk := range xslices.Chunk(messageIDs, db.ChunkLimit) {
 		query := fmt.Sprintf("SELECT `m`.`%[1]v`, GROUP_CONCAT(`f`.`%[2]v`) AS `flags`, `m`.`%[3]v`, `m`.`%[4]v`, "+
-			"`m`.`%[5]v`, `m`.`%[6]v` FROM %[9]v AS m "+
+			"`m`.`%[5]v`, `m`.`%[10]v`, `m`.`%[6]v` FROM %[9]v AS m "+
 			"LEFT JOIN `%[7]v` AS f ON `f`.`%[8]v` = `m`.`%[6]v` "+
-			"WHERE `m`.`%[6]v` IN (%[10]v) "+
+			"WHERE `m`.`%[6]v` IN (%[11]v) "+
 			"GROUP BY `m`.`%[6]v` ORDER BY `m`.`%[5]v`",
 			v1.MailboxMessagesFieldMessageRemoteID,
 			v1.MessageFlagsFieldValue,
@@ -363,6 +365,7 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 			v1.MessageFlagsTableName,
 			v1.MessageFlagsFieldMessageID,
 			v1.MailboxMessageTableName(mboxID),
+			v4.MailboxMessagesFieldModSeq,
 			utils.GenSQLIn(len(chunk)),
 		)
 
@@ -372,7 +375,7 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 			var r db.UIDWithFlags
 			var flags sql.NullString
 
-			if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID); err != nil {
+			if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.ModSeq, &r.InternalID); err != nil {
 				return db.UIDWithFlags{}, err
 			}
 
@@ -388,6 +391,70 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 	}
 
 	return result, nil
+}
+
+func (r readOps) GetMailboxHighestModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error) {
+	query := fmt.Sprintf("SELECT `%v` FROM `%v` WHERE `%v` = ?",
+		v4.MailboxesFieldHighestModSeq,
+		v1.MailboxesTableName,
+		v1.MailboxesFieldID,
+	)
+
+	return utils.MapQueryRow[imap.ModSeq](ctx, r.qw, query, mboxID)
+}
+
+func (r readOps) GetMailboxMessagesChangedSince(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]db.SnapshotMessageResult, error) {
+	query := fmt.Sprintf("SELECT `m`.`%[1]v`, GROUP_CONCAT(`f`.`%[2]v`) AS `flags`, `m`.`%[3]v`, `m`.`%[4]v`, "+
+		"`m`.`%[5]v`, `m`.`%[10]v`, `m`.`%[6]v` FROM %[9]v AS m "+
+		"LEFT JOIN `%[7]v` AS f ON `f`.`%[8]v` = `m`.`%[6]v` "+
+		"WHERE `m`.`%[10]v` > ? "+
+		"GROUP BY `m`.`%[6]v` ORDER BY `m`.`%[5]v`",
+		v1.MailboxMessagesFieldMessageRemoteID,
+		v1.MessageFlagsFieldValue,
+		v1.MailboxMessagesFieldRecent,
+		v1.MailboxMessagesFieldDeleted,
+		v1.MailboxMessagesFieldUID,
+		v1.MailboxMessagesFieldMessageID,
+		v1.MessageFlagsTableName,
+		v1.MessageFlagsFieldMessageID,
+		v1.MailboxMessageTableName(mboxID),
+		v4.MailboxMessagesFieldModSeq,
+	)
+
+	return utils.MapQueryRowsFn(ctx, r.qw, query, func(scanner utils.RowScanner) (db.SnapshotMessageResult, error) {
+		var r db.SnapshotMessageResult
+		var flags sql.NullString
+
+		if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.ModSeq, &r.InternalID); err != nil {
+			return db.SnapshotMessageResult{}, err
+		}
+
+		r.Flags = flags.String
+
+		return r, nil
+	}, since)
+}
+
+func (r readOps) GetVanishedUIDsAfterModSeq(ctx context.Context, mboxID imap.InternalMailboxID, since imap.ModSeq) ([]imap.UID, error) {
+	query := fmt.Sprintf("SELECT `%v` FROM `%v` WHERE `%v` = ? AND `%v` > ? ORDER BY `%v`",
+		v4.VanishedHistoryFieldUID,
+		v4.VanishedHistoryTableName,
+		v4.VanishedHistoryFieldMailboxID,
+		v4.VanishedHistoryFieldModSeq,
+		v4.VanishedHistoryFieldUID,
+	)
+
+	return utils.MapQueryRows[imap.UID](ctx, r.qw, query, mboxID, since)
+}
+
+func (r readOps) GetVanishedHistoryPrunedModSeq(ctx context.Context, mboxID imap.InternalMailboxID) (imap.ModSeq, error) {
+	query := fmt.Sprintf("SELECT `%v` FROM `%v` WHERE `%v` = ?",
+		v4.MailboxesFieldVanishedHistoryPrunedModSeq,
+		v1.MailboxesTableName,
+		v1.MailboxesFieldID,
+	)
+
+	return utils.MapQueryRow[imap.ModSeq](ctx, r.qw, query, mboxID)
 }
 
 func (r readOps) MessageExists(ctx context.Context, id imap.InternalMessageID) (bool, error) {
