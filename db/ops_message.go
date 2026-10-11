@@ -16,6 +16,13 @@ type MessageReadOps interface {
 
 	GetTotalMessageCount(ctx context.Context) (int, error)
 
+	// GetTotalMessageSize returns the sum of the literal sizes of all non-deleted messages,
+	// in bytes. Used for APPEND quota accounting.
+	GetTotalMessageSize(ctx context.Context) (int64, error)
+
+	// GetMessageUIDInMailbox returns the UID of a message in the given mailbox, or ErrNotFound.
+	GetMessageUIDInMailbox(ctx context.Context, id imap.InternalMessageID, mbox imap.InternalMailboxID) (imap.UID, error)
+
 	GetMessageRemoteID(ctx context.Context, id imap.InternalMessageID) (imap.MessageID, error)
 
 	GetImportedMessageData(ctx context.Context, id imap.InternalMessageID) (*MessageWithFlags, error)

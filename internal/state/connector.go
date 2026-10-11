@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/ProtonMail/gluon/db"
@@ -83,4 +84,19 @@ type Connector interface {
 
 	// SetMessagesForwarded marks the message with the given ID as forwarded.
 	SetMessagesForwarded(ctx context.Context, tx db.Transaction, messageIDs []imap.MessageID, forwarded bool) ([]Update, error)
+}
+
+// StreamingConnector is an optional extension of Connector that accepts streamed APPEND
+// literals. A remote that does not implement StreamingConnector is called with a buffered
+// literal instead.
+type StreamingConnector interface {
+	CreateMessageFromReader(
+		ctx context.Context,
+		tx db.Transaction,
+		mboxID imap.MailboxID,
+		r io.Reader,
+		size int64,
+		flags imap.FlagSet,
+		date time.Time,
+	) ([]Update, imap.InternalMessageID, imap.Message, []byte, error)
 }

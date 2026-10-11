@@ -317,3 +317,45 @@ func WithConnectionLimiter(limits, fallbackLimits connectionlimiter.Limits) Opti
 		limiter: connectionlimiter.NewConnectionLimiter(limits, fallbackLimits),
 	}
 }
+
+type withAppendReadTimeout struct {
+	timeout time.Duration
+}
+
+func (w withAppendReadTimeout) config(builder *serverBuilder) {
+	builder.appendReadTimeout = w.timeout
+}
+
+// WithAppendReadTimeout bounds how long the server waits for an APPEND literal body to
+// arrive. Zero disables the timeout. Defaults to 5 minutes.
+func WithAppendReadTimeout(timeout time.Duration) Option {
+	return &withAppendReadTimeout{timeout: timeout}
+}
+
+type withAppendSpoolMemoryLimit struct {
+	limit int64
+}
+
+func (w withAppendSpoolMemoryLimit) config(builder *serverBuilder) {
+	builder.appendSpoolMemoryLimit = w.limit
+}
+
+// WithAppendSpoolMemoryLimit sets the maximum in-memory size of a streamed APPEND literal
+// before it spills to a restricted temporary file.
+func WithAppendSpoolMemoryLimit(limit int64) Option {
+	return &withAppendSpoolMemoryLimit{limit: limit}
+}
+
+type withAppendJournalRetention struct {
+	retention time.Duration
+}
+
+func (w withAppendJournalRetention) config(builder *serverBuilder) {
+	builder.appendJournalRetention = w.retention
+}
+
+// WithAppendJournalRetention sets how long confirmed append journal entries are retained to
+// make retried APPEND requests after a lost connection idempotent. Defaults to 24 hours.
+func WithAppendJournalRetention(retention time.Duration) Option {
+	return &withAppendJournalRetention{retention: retention}
+}

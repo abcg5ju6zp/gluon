@@ -14,6 +14,7 @@ type Builder interface {
 type parserBuilder struct {
 	continuationCallback    func(string) error
 	disableIMAPAuthenticate bool
+	appendSink              AppendLiteralSinkFactory
 }
 
 type Option interface {
@@ -44,6 +45,20 @@ func WithDisableIMAPAuthenticate() Option {
 	return &withDisableIMAPAuthenticate{}
 }
 
+type withAppendLiteralSink struct {
+	factory AppendLiteralSinkFactory
+}
+
+func (opt withAppendLiteralSink) config(builder *parserBuilder) {
+	builder.appendSink = opt.factory
+}
+
+// WithAppendLiteralSink installs the sink used to stream APPEND literal bodies. When no sink
+// is configured, APPEND literals are fully buffered as before.
+func WithAppendLiteralSink(factory AppendLiteralSinkFactory) Option {
+	return &withAppendLiteralSink{factory: factory}
+}
+
 // Parser parses IMAP Commands.
 type Parser struct {
 	parser   *rfcparser.Parser
@@ -61,7 +76,7 @@ func NewParser(s *rfcparser.Scanner, options ...Option) *Parser {
 
 	commands := map[string]Builder{
 		"list":        &ListCommandParser{},
-		"append":      &AppendCommandParser{},
+		"append":      &AppendCommandParser{sinkFactory: builder.appendSink},
 		"search":      &SearchCommandParser{},
 		"fetch":       &FetchCommandParser{},
 		"capability":  &CapabilityCommandParser{},

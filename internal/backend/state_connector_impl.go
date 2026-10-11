@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/ProtonMail/gluon/connector"
@@ -94,6 +95,45 @@ func (sc *stateConnectorImpl) CreateMessage(
 	cache := sc.newDBIMAPWrite(tx)
 
 	msg, newLiteral, err := sc.connector.CreateMessage(ctx, &cache, mboxID, literal, flags, date)
+	if err != nil {
+		return nil, imap.InternalMessageID{}, imap.Message{}, nil, err
+	}
+
+	return cache.stateUpdates, imap.NewInternalMessageID(), msg, newLiteral, nil
+}
+
+// CreateMessageFromReader forwards a streamed APPEND literal to a connector implementing
+// StreamingConnector. Connectors without streaming support fall back to the buffered call.
+func (sc *stateConnectorImpl) CreateMessageFromReader(
+	ctx context.Context,
+	tx db.Transaction,
+	mboxID imap.MailboxID,
+	r io.Reader,
+	size int64,
+	flags imap.FlagSet,
+	date time.Time,
+) ([]state.Update, imap.InternalMessageID, imap.Message, []byte, error) {
+	ctx = sc.newContextWithMetadata(ctx)
+
+	cache := sc.newDBIMAPWrite(tx)
+
+	var (
+		msg        imap.Message
+		newLiteral []byte
+		err        error
+	)
+
+	if streaming, ok := sc.connector.(connector.StreamingConnector); ok {
+		msg, newLiteral, err = streaming.CreateMessageFromReader(ctx, &cache, mboxID, r, size, flags, date)
+	} else {
+		literal, readErr := io.ReadAll(r)
+		if readErr != nil {
+			return nil, imap.InternalMessageID{}, imap.Message{}, nil, readErr
+		}
+
+		msg, newLiteral, err = sc.connector.CreateMessage(ctx, &cache, mboxID, literal, flags, date)
+	}
+
 	if err != nil {
 		return nil, imap.InternalMessageID{}, imap.Message{}, nil, err
 	}

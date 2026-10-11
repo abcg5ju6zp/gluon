@@ -201,10 +201,23 @@ func (state *dummyState) createMessage(
 	otherFlags imap.FlagSet,
 	date time.Time,
 ) imap.Message {
+	return state.createMessageWithID(
+		imap.MessageID(uuid.NewString()),
+		mboxID, literal, parsed, seen, flagged, otherFlags, date,
+	)
+}
+
+func (state *dummyState) createMessageWithID(
+	messageID imap.MessageID,
+	mboxID imap.MailboxID,
+	literal []byte,
+	parsed *imap.ParsedMessage,
+	seen, flagged bool,
+	otherFlags imap.FlagSet,
+	date time.Time,
+) imap.Message {
 	state.lock.Lock()
 	defer state.lock.Unlock()
-
-	messageID := imap.MessageID(uuid.NewString())
 
 	if seen {
 		otherFlags.RemoveFromSelf(imap.FlagSeen)
@@ -223,6 +236,24 @@ func (state *dummyState) createMessage(
 		date:    date,
 		mboxIDs: map[imap.MailboxID]struct{}{mboxID: {}},
 	}
+
+	return state.toMessage(messageID)
+}
+
+// hasMessage reports whether a message with the given remote ID exists.
+func (state *dummyState) hasMessage(messageID imap.MessageID) bool {
+	state.lock.Lock()
+	defer state.lock.Unlock()
+
+	_, ok := state.messages[messageID]
+
+	return ok
+}
+
+// storedMessage returns the stored message by remote ID. It must exist.
+func (state *dummyState) storedMessage(messageID imap.MessageID) imap.Message {
+	state.lock.Lock()
+	defer state.lock.Unlock()
 
 	return state.toMessage(messageID)
 }

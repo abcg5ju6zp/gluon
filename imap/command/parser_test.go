@@ -111,10 +111,11 @@ func TestParser_LiteralWithContinuationSubmission(t *testing.T) {
 	}))
 
 	expected := Command{Tag: "A003", Payload: &Append{
-		Mailbox:  "saved-messages",
-		Flags:    []string{`\Seen`},
-		Literal:  []byte("My message body is here"),
-		DateTime: buildAppendDateTime(1984, time.November, 15, 13, 37, 1, 07, 30, false),
+		Mailbox:     "saved-messages",
+		Flags:       []string{`\Seen`},
+		Literal:     []byte("My message body is here"),
+		LiteralSize: 23,
+		DateTime:    buildAppendDateTime(1984, time.November, 15, 13, 37, 1, 07, 30, false),
 	}}
 
 	cmd, err := p.Parse()

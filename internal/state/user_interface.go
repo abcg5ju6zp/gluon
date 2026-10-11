@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"io"
 
 	"github.com/ProtonMail/gluon/db"
 	"github.com/ProtonMail/gluon/imap"
@@ -32,4 +33,14 @@ type UserInterface interface {
 	GenerateUIDValidity() (imap.UID, error)
 
 	GetRecoveredMessageHashesMap() *utils.MessageHashesMap
+
+	// BeginAppendUpload reserves quota, creates the reception spool object and records the
+	// receiving journal entry for a streaming APPEND, without calling the connector.
+	BeginAppendUpload(ctx context.Context, declaredSize int64) (Upload, error)
+
+	// OpenSpool opens a previously received spool object by attempt ID (crash/reply recovery).
+	OpenSpool(attemptID string) (io.ReadSeekCloser, error)
+
+	// RemoveSpool removes a spool object by attempt ID.
+	RemoveSpool(attemptID string) error
 }

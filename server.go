@@ -104,6 +104,9 @@ type Server struct {
 	featureFlagProvider unleash.FeatureFlagValueProvider
 
 	connectionLimiter connectionlimiter.ConnectionLimiter
+
+	// appendReadTimeout bounds reads of a streamed APPEND literal body.
+	appendReadTimeout time.Duration
 }
 
 // New creates a new server with the given options.
@@ -377,7 +380,7 @@ func (s *Server) addSession(ctx context.Context, conn net.Conn) (*session.Sessio
 
 	nextID := s.getNextID()
 
-	s.sessions[nextID] = session.New(conn, s.backend, nextID, s.versionInfo, s.cmdExecProfBuilder, s.newEventCh(ctx), s.idleBulkTime, s.disableIMAPAuthenticate, s.panicHandler, s.featureFlagProvider)
+	s.sessions[nextID] = session.New(conn, s.backend, nextID, s.versionInfo, s.cmdExecProfBuilder, s.newEventCh(ctx), s.idleBulkTime, s.disableIMAPAuthenticate, s.panicHandler, s.featureFlagProvider, s.appendReadTimeout)
 
 	if s.tlsConfig != nil {
 		s.sessions[nextID].SetTLSConfig(s.tlsConfig)

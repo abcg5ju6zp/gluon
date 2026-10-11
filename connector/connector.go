@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/ProtonMail/gluon/imap"
@@ -62,4 +63,27 @@ type Connector interface {
 
 	// Close the connector will no longer be used and all resources should be closed/released.
 	Close(ctx context.Context) error
+}
+
+// StreamingConnector is an optional Connector extension that accepts an APPEND literal as a
+// stream instead of a fully buffered byte slice. Implementations must not retain r after the
+// method returns. An empty/nil returned literal means "store the original stream contents".
+type StreamingConnector interface {
+	Connector
+
+	CreateMessageFromReader(
+		ctx context.Context,
+		cache IMAPStateWrite,
+		mboxID imap.MailboxID,
+		r io.Reader,
+		size int64,
+		flags imap.FlagSet,
+		date time.Time,
+	) (imap.Message, []byte, error)
+}
+
+// QuotaConnector is an optional Connector extension that reports the user's storage quota in
+// bytes. A non-positive limit means unlimited.
+type QuotaConnector interface {
+	GetQuotaBytes(ctx context.Context) (int64, error)
 }

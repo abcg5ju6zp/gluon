@@ -34,9 +34,9 @@ $ telnet 127.0.0.1 1143
 Trying 127.0.0.1...
 Connected to localhost.
 Escape character is '^]'.
-* OK [CAPABILITY IDLE IMAP4rev1 MOVE UIDPLUS UNSELECT]  00.00.00 - gluon session ID 2
+* OK [CAPABILITY IDLE IMAP4rev1 LITERAL+ MOVE UIDPLUS UNSELECT]  00.00.00 - gluon session ID 2
 tag login user1@example.com pass
-tag OK [CAPABILITY IDLE IMAP4rev1 MOVE UIDPLUS UNSELECT] Logged in
+tag OK [CAPABILITY IDLE IMAP4rev1 LITERAL+ MOVE UIDPLUS UNSELECT] Logged in
 tag append inbox (\Seen) {14}
 + Ready
 To: user@pm.me

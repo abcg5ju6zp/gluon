@@ -34,6 +34,7 @@ type Mailbox struct {
 
 type AppendOnlyMailbox interface {
 	Append(ctx context.Context, literal []byte, flags imap.FlagSet, date time.Time) (imap.UID, error)
+	AppendUpload(ctx context.Context, upload Upload, flags imap.FlagSet, date time.Time) (imap.UID, error)
 	Flush(ctx context.Context, permitExpunge bool) ([]response.Response, error)
 	UIDValidity() imap.UID
 	IsDrafts(ctx context.Context) (bool, error)

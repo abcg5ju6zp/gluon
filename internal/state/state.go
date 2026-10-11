@@ -82,6 +82,12 @@ func (state *State) UserID() string {
 	return state.user.GetUserID()
 }
 
+// BeginAppendUpload prepares a streaming APPEND reception: quota reservation, spool object and
+// receiving journal entry, without calling the connector.
+func (state *State) BeginAppendUpload(ctx context.Context, declaredSize int64) (Upload, error) {
+	return state.user.BeginAppendUpload(ctx, declaredSize)
+}
+
 func (state *State) List(ctx context.Context, ref, pattern string, lsub bool, fn func(map[string]Match) error) error {
 	return stateDBRead(ctx, state, func(ctx context.Context, client db.ReadOnly) error {
 		mailboxes, err := client.GetAllMailboxesWithAttr(ctx)

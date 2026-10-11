@@ -99,6 +99,9 @@ type Session struct {
 
 	featureFlagProvider unleash.FeatureFlagValueProvider
 
+	// appendReadTimeout bounds reads of a streamed APPEND literal body. Zero disables it.
+	appendReadTimeout time.Duration
+
 	closeOnce sync.Once
 }
 
@@ -113,11 +116,12 @@ func New(
 	disableIMAPAuthenticate bool,
 	panicHandler async.PanicHandler,
 	featureFlagProvider unleash.FeatureFlagValueProvider,
+	appendReadTimeout time.Duration,
 ) *Session {
 	inputCollector := command.NewInputCollector(bufio.NewReader(conn))
 	scanner := rfcparser.NewScannerWithReader(inputCollector)
 
-	caps := []imap.Capability{imap.IMAP4rev1, imap.UNSELECT, imap.UIDPLUS, imap.MOVE, imap.ID}
+	caps := []imap.Capability{imap.IMAP4rev1, imap.UNSELECT, imap.UIDPLUS, imap.MOVE, imap.ID, imap.LiteralPlus}
 
 	if !featureFlagProvider.GetFlagValue(unleash.CapabilityKillSwitchMap[string(imap.IDLE)]) {
 		caps = append(caps, imap.IDLE)
@@ -141,8 +145,9 @@ func New(
 		handleWG:                async.MakeWaitGroup(panicHandler),
 		disableIMAPAuthenticate: disableIMAPAuthenticate,
 		panicHandler:            panicHandler,
-		log:                     logrus.WithField("pkg", "gluon/session").WithField("session", sessionID),
+		log: logrus.WithField("pkg", "gluon/session").WithField("session", sessionID),
 		featureFlagProvider:     featureFlagProvider,
+		appendReadTimeout:       appendReadTimeout,
 	}
 }
 

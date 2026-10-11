@@ -255,6 +255,36 @@ func (r ReadTracer) GetAllMailboxesNameAndRemoteID(ctx context.Context) ([]db.Ma
 	return r.RD.GetAllMailboxesNameAndRemoteID(ctx)
 }
 
+func (r ReadTracer) GetAppendJournal(ctx context.Context, attemptID string) (*db.AppendJournalEntry, error) {
+	r.Entry.Tracef("GetAppendJournal")
+
+	return r.RD.GetAppendJournal(ctx, attemptID)
+}
+
+func (r ReadTracer) GetAppendJournalByIdentity(ctx context.Context, identityHash string) (*db.AppendJournalEntry, error) {
+	r.Entry.Tracef("GetAppendJournalByIdentity")
+
+	return r.RD.GetAppendJournalByIdentity(ctx, identityHash)
+}
+
+func (r ReadTracer) GetAllAppendJournal(ctx context.Context) ([]*db.AppendJournalEntry, error) {
+	r.Entry.Tracef("GetAllAppendJournal")
+
+	return r.RD.GetAllAppendJournal(ctx)
+}
+
+func (r ReadTracer) GetTotalMessageSize(ctx context.Context) (int64, error) {
+	r.Entry.Tracef("GetTotalMessageSize")
+
+	return r.RD.GetTotalMessageSize(ctx)
+}
+
+func (r ReadTracer) GetMessageUIDInMailbox(ctx context.Context, id imap.InternalMessageID, mbox imap.InternalMailboxID) (imap.UID, error) {
+	r.Entry.Tracef("GetMessageUIDInMailbox")
+
+	return r.RD.GetMessageUIDInMailbox(ctx, id, mbox)
+}
+
 // WriteTracer prints all method names to a trace log.
 type WriteTracer struct {
 	ReadTracer
@@ -477,4 +507,62 @@ func (w WriteTracer) AddPermFlagsToAllMailboxes(ctx context.Context, flags ...st
 	w.Entry.Tracef("AddPermFlagsToAllMailboxes")
 
 	return w.TX.AddPermFlagsToAllMailboxes(ctx, flags...)
+}
+
+func (w WriteTracer) InsertAppendJournalReceiving(ctx context.Context, attemptID string, size int64, now time.Time) error {
+	w.Entry.Tracef("InsertAppendJournalReceiving")
+
+	return w.TX.InsertAppendJournalReceiving(ctx, attemptID, size, now)
+}
+
+func (w WriteTracer) SetAppendJournalSubmitting(
+		ctx context.Context,
+		attemptID string,
+		identityHash string,
+		contentHash string,
+		mailboxID imap.InternalMailboxID,
+		originState int64,
+		flags []string,
+		date time.Time,
+		now time.Time,
+	) error {
+	w.Entry.Tracef("SetAppendJournalSubmitting")
+
+	return w.TX.SetAppendJournalSubmitting(ctx, attemptID, identityHash, contentHash, mailboxID, originState, flags, date, now)
+}
+
+func (w WriteTracer) SetAppendJournalAccepted(
+	ctx context.Context,
+	attemptID string,
+	remoteID imap.MessageID,
+	internalID imap.InternalMessageID,
+	now time.Time,
+) error {
+	w.Entry.Tracef("SetAppendJournalAccepted")
+
+	return w.TX.SetAppendJournalAccepted(ctx, attemptID, remoteID, internalID, now)
+}
+
+func (w WriteTracer) SetAppendJournalConfirmed(
+	ctx context.Context,
+	attemptID string,
+	mailboxID imap.InternalMailboxID,
+	uid imap.UID,
+	now time.Time,
+) error {
+	w.Entry.Tracef("SetAppendJournalConfirmed")
+
+	return w.TX.SetAppendJournalConfirmed(ctx, attemptID, mailboxID, uid, now)
+}
+
+func (w WriteTracer) DeleteAppendJournal(ctx context.Context, attemptID string) error {
+	w.Entry.Tracef("DeleteAppendJournal")
+
+	return w.TX.DeleteAppendJournal(ctx, attemptID)
+}
+
+func (w WriteTracer) DeleteConfirmedAppendJournalBefore(ctx context.Context, before time.Time) (int64, error) {
+	w.Entry.Tracef("DeleteConfirmedAppendJournalBefore")
+
+	return w.TX.DeleteConfirmedAppendJournalBefore(ctx, before)
 }

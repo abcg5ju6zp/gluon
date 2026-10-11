@@ -3,10 +3,19 @@ package rfcparser
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
 const DefaultContinuationMessage = "Ready"
+
+// MaxLiteralSize is the maximum accepted literal size (70 MiB). A literal declaring this size
+// or more is rejected.
+const MaxLiteralSize = 70 * 1024 * 1024
+
+// ErrLiteralTooLarge is wrapped by the error returned when a literal declares more than
+// MaxLiteralSize bytes.
+var ErrLiteralTooLarge = fmt.Errorf("literal size exceeds maximum size of 70MB")
 
 // Parser provide facilities to consumes tokens from a given scanner. Advance should be called at least once before
 // any checks in order to initialize the previousToken.
@@ -174,50 +183,118 @@ func (p *Parser) ParseQuoted() (String, error) {
 	return String{Value: string(quoted), Offset: startOffset}, nil
 }
 
-// ParseLiteral parses a literal as defined in RFC3501.
+// ParseLiteral parses a literal as defined in RFC3501 and additionally accepts the
+// non-synchronizing literal form of RFC 7888 ("{<n>+}"), in which case no continuation is
+// sent. The full literal is buffered and returned.
 func (p *Parser) ParseLiteral() ([]byte, error) {
 	/*
-		literal         = "{" number "}" CRLF *CHAR8
+		literal         = "{" number ["+"] "}" CRLF *CHAR8
 	*/
-	if err := p.Consume(TokenTypeLCurly, "expected '{' for literal start"); err != nil {
-		return nil, err
-	}
-
-	literalSize, err := p.ParseNumber()
+	literalSize, nonSynchronous, err := p.ParseLiteralHeader()
 	if err != nil {
 		return nil, err
 	}
 
-	if literalSize <= 0 {
-		return nil, fmt.Errorf("invalid literal size")
-	}
-
-	if literalSize >= 70*1024*1024 {
-		return nil, fmt.Errorf("literal size exceeds maximum size of 70MB")
-	}
-
-	if err := p.Consume(TokenTypeRCurly, "expected '}' for literal end"); err != nil {
-		return nil, err
-	}
-
-	if err := p.Consume(TokenTypeCR, "expected CR"); err != nil {
-		return nil, err
-	}
-
-	// Call literal continuation callback here or we risk getting stuck forever trying to read the next token
-	// in the scanner due to the byte buffers implementation as there will be no more new input until the we signal
-	// for more input.
-	if p.Check(TokenTypeLF) && p.literalContinuationCb != nil {
-		if err := p.literalContinuationCb(DefaultContinuationMessage); err != nil {
-			return nil, fmt.Errorf("error occurred during literal continuation callback:%w", err)
-		}
-	}
-
-	if err := p.Consume(TokenTypeLF, "expected LF after CR"); err != nil {
+	if err := p.ConsumeLiteralLF(nonSynchronous); err != nil {
 		return nil, err
 	}
 
 	literal := make([]byte, literalSize)
+
+	if err := p.scanner.ConsumeBytes(literal); err != nil {
+		return nil, err
+	}
+
+	// Need to advance parser after scanning literal so that next token is loaded
+	if err := p.Advance(); err != nil {
+		return nil, err
+	}
+
+	return literal, nil
+}
+
+// ParseLiteralHeader parses the literal header "{" number ["+"] "}" CR. It performs the
+// declared-size validation (<=0 and >= MaxLiteralSize). It consumes neither the LF following
+// CR nor any literal data. Use ConsumeLiteralLF to consume the LF (which also fires the
+// continuation callback for synchronous literals), then StreamLiteralBody or ConsumeBytes to
+// read the declared number of bytes.
+func (p *Parser) ParseLiteralHeader() (int, bool, error) {
+	if err := p.Consume(TokenTypeLCurly, "expected '{' for literal start"); err != nil {
+		return 0, false, err
+	}
+
+	literalSize, err := p.ParseNumber()
+	if err != nil {
+		return 0, false, err
+	}
+
+	if literalSize <= 0 {
+		return 0, false, fmt.Errorf("invalid literal size")
+	}
+
+	if literalSize >= MaxLiteralSize {
+		return 0, false, fmt.Errorf("%w (declared %d)", ErrLiteralTooLarge, literalSize)
+	}
+
+	// RFC 7888 non-synchronizing literal: "{<n>+}".
+	nonSynchronous := false
+
+	if p.Check(TokenTypePlus) {
+		if err := p.Consume(TokenTypePlus, "expected '+' after literal size"); err != nil {
+			return 0, false, err
+		}
+
+		nonSynchronous = true
+	}
+
+	if err := p.Consume(TokenTypeRCurly, "expected '}' for literal end"); err != nil {
+		return 0, false, err
+	}
+
+	if err := p.Consume(TokenTypeCR, "expected CR"); err != nil {
+		return 0, false, err
+	}
+
+	return literalSize, nonSynchronous, nil
+}
+
+// ConsumeLiteralLF consumes the LF after a literal header CR. For synchronous literals the
+// continuation callback is invoked at exactly the same point as in ParseLiteral (after CR,
+// before LF). Non-synchronizing literals never trigger the callback.
+func (p *Parser) ConsumeLiteralLF(nonSynchronous bool) error {
+	// Call literal continuation callback here or we risk getting stuck forever trying to read the next token
+	// in the scanner due to the byte buffers implementation as there will be no more new input until the we signal
+	// for more input.
+	if !nonSynchronous && p.Check(TokenTypeLF) && p.literalContinuationCb != nil {
+		if err := p.literalContinuationCb(DefaultContinuationMessage); err != nil {
+			return fmt.Errorf("error occurred during literal continuation callback:%w", err)
+		}
+	}
+
+	if err := p.Consume(TokenTypeLF, "expected LF after CR"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// StreamLiteralBody streams exactly size literal bytes into dst without buffering them, then
+// advances the parser so the next token (the trailing CR) is loaded. The first literal byte is
+// already held by the scanner (see Scanner.StreamLiteralBody).
+func (p *Parser) StreamLiteralBody(dst io.Writer, size int) error {
+	if err := p.scanner.StreamLiteralBody(dst, size); err != nil {
+		return err
+	}
+
+	// Need to advance parser after scanning literal so that next token is loaded
+	return p.Advance()
+}
+
+// ReadLiteralBody reads and buffers exactly size literal bytes after the literal header and
+// CR/LF have already been consumed with ParseLiteralHeader and ConsumeLiteralLF. It is the
+// buffered counterpart of StreamLiteralBody.
+func (p *Parser) ReadLiteralBody(size int) ([]byte, error) {
+	literal := make([]byte, size)
 
 	if err := p.scanner.ConsumeBytes(literal); err != nil {
 		return nil, err

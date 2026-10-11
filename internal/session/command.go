@@ -35,6 +35,7 @@ func (s *Session) startCommandReader(ctx context.Context) <-chan commandResult {
 
 		options := []command.Option{
 			command.WithLiteralContinuationCallback(func(message string) error { return response.Continuation().Send(s, message) }),
+			command.WithAppendLiteralSink(s.appendLiteralSinkFactory(ctx)),
 		}
 		if s.disableIMAPAuthenticate {
 			options = append(options, command.WithDisableIMAPAuthenticate())
@@ -48,6 +49,29 @@ func (s *Session) startCommandReader(ctx context.Context) <-chan commandResult {
 			cmd, err := parser.Parse()
 			s.logIncoming(string(s.inputCollector.Bytes()))
 			if err != nil {
+				var rejected *command.AppendRejectedError
+				if errors.As(err, &rejected) {
+					// Rejected before/during reception (size cap, quota, spool failure). The
+					// tagged NO is sent before draining so a client that waits for the
+					// response before sending more data cannot deadlock the reader.
+					if sendErr := response.No(parser.LastParsedTag()).WithError(rejected.Cause).Send(s); sendErr != nil {
+						return
+					}
+
+					if rejected.DrainLine || rejected.DrainTrailer {
+						// For DrainLine the remainder of the header line is still in the
+						// source; for DrainTrailer the body was drained and only the command
+						// CRLF remains (its CR is tokenized; ReadBytes consumes the LF).
+						if drainErr := parser.ConsumeInvalidInput(); drainErr != nil {
+							return
+						}
+					}
+
+					s.log.WithError(rejected.Cause).Warn("APPEND rejected")
+
+					continue
+				}
+
 				var parserError *rfcparser.Error
 				if !errors.As(err, &parserError) {
 					return

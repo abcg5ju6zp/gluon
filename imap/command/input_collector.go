@@ -5,14 +5,16 @@ import (
 )
 
 type InputCollector struct {
-	source rfcparser.Reader
-	bytes  []byte
+	source     rfcparser.Reader
+	bytes      []byte
+	collecting bool
 }
 
 func NewInputCollector(source rfcparser.Reader) *InputCollector {
 	return &InputCollector{
-		source: source,
-		bytes:  make([]byte, 0, 128),
+		source:     source,
+		bytes:      make([]byte, 0, 128),
+		collecting: true,
 	}
 }
 
@@ -20,9 +22,15 @@ func (i *InputCollector) Bytes() []byte {
 	return i.bytes
 }
 
+// SetCollecting toggles collection of incoming bytes for logging. Collection is suspended
+// while a large literal body is streamed so its bytes do not accumulate in memory.
+func (i *InputCollector) SetCollecting(collecting bool) {
+	i.collecting = collecting
+}
+
 func (i *InputCollector) Read(dst []byte) (int, error) {
 	n, err := i.source.Read(dst)
-	if err == nil {
+	if err == nil && i.collecting {
 		i.bytes = append(i.bytes, dst[0:n]...)
 	}
 
@@ -31,7 +39,7 @@ func (i *InputCollector) Read(dst []byte) (int, error) {
 
 func (i *InputCollector) ReadByte() (byte, error) {
 	b, err := i.source.ReadByte()
-	if err == nil {
+	if err == nil && i.collecting {
 		i.bytes = append(i.bytes, b)
 	}
 
@@ -40,7 +48,7 @@ func (i *InputCollector) ReadByte() (byte, error) {
 
 func (i *InputCollector) ReadBytes(delim byte) ([]byte, error) {
 	b, err := i.source.ReadBytes(delim)
-	if err == nil {
+	if err == nil && i.collecting {
 		i.bytes = append(i.bytes, b...)
 	}
 

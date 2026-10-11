@@ -104,6 +104,46 @@ func (s *Scanner) ConsumeBytes(dst []byte) error {
 	return nil
 }
 
+// streamLiteralChunkSize is the chunk size used when streaming literal bodies to a writer.
+const streamLiteralChunkSize = 32 * 1024
+
+// StreamLiteralBody writes exactly size literal bytes to dst. As with ConsumeBytes, the first
+// literal byte has already been read into s.currentByte; the remaining size-1 bytes are read
+// from the underlying source. Reads are capped by the declared size, so pipelined bytes
+// following the literal are never over-read. A short read (client disconnect) is reported as
+// io.EOF, mirroring ConsumeBytes.
+func (s *Scanner) StreamLiteralBody(dst io.Writer, size int) error {
+	if size <= 0 {
+		return fmt.Errorf("invalid literal size")
+	}
+
+	// We have already read a byte at this point, so we need to
+	// skip this one.
+	if _, err := dst.Write([]byte{s.currentByte}); err != nil {
+		return err
+	}
+
+	if size > 1 {
+		n, err := io.CopyBuffer(
+			dst,
+			io.LimitReader(s.source, int64(size-1)),
+			make([]byte, streamLiteralChunkSize),
+		)
+		if err != nil {
+			return err
+		}
+
+		// io.CopyBuffer returns a nil error when the source ends before the limit is reached.
+		if n != int64(size-1) {
+			return io.EOF
+		}
+	}
+
+	s.offset += size - 1
+
+	return nil
+}
+
 func (s *Scanner) ConsumeUntilNewLine() ([]byte, error) {
 	return s.source.ReadBytes('\n')
 }

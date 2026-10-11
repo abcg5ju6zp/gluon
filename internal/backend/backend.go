@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 	"github.com/ProtonMail/gluon/connector"
 	"github.com/ProtonMail/gluon/db"
 	"github.com/ProtonMail/gluon/imap"
+	"github.com/ProtonMail/gluon/internal/spool"
 	"github.com/ProtonMail/gluon/internal/state"
 	"github.com/ProtonMail/gluon/limits"
 	"github.com/ProtonMail/gluon/observability"
@@ -25,6 +28,33 @@ import (
 
 // maxLoginAttempts is the maximum number of permitted login attempts before the user is jailed.
 const maxLoginAttempts = 3
+
+// AppendConfig configures the streaming APPEND flow.
+type AppendConfig struct {
+	// SpoolMemoryLimit is the maximum literal size kept in memory before spilling to disk.
+	SpoolMemoryLimit int64
+
+	// JournalRetention is how long confirmed journal entries are retained for idempotent
+	// retries after a lost connection.
+	JournalRetention time.Duration
+}
+
+const (
+	defaultSpoolMemoryLimit = 256 * 1024
+	defaultJournalRetention = 24 * time.Hour
+)
+
+func (c AppendConfig) withDefaults() AppendConfig {
+	if c.SpoolMemoryLimit <= 0 {
+		c.SpoolMemoryLimit = defaultSpoolMemoryLimit
+	}
+
+	if c.JournalRetention <= 0 {
+		c.JournalRetention = defaultJournalRetention
+	}
+
+	return c
+}
 
 type Backend struct {
 	// dataDir is the directory in which backend files should be stored.
@@ -53,6 +83,9 @@ type Backend struct {
 
 	imapLimits limits.IMAP
 
+	// appendConfig configures the streaming APPEND flow.
+	appendConfig AppendConfig
+
 	database db.ClientInterface
 
 	panicHandler async.PanicHandler
@@ -67,6 +100,7 @@ func New(dataDir, databaseDir string,
 	imapLimits limits.IMAP,
 	panicHandler async.PanicHandler,
 	database db.ClientInterface,
+	appendConfig AppendConfig,
 ) (*Backend, error) {
 	return &Backend{
 		dataDir:       dataDir,
@@ -76,6 +110,7 @@ func New(dataDir, databaseDir string,
 		storeBuilder:  storeBuilder,
 		loginJailTime: loginJailTime,
 		imapLimits:    imapLimits,
+		appendConfig:  appendConfig.withDefaults(),
 		panicHandler:  panicHandler,
 		database:      database,
 		log:           logrus.WithField("pkg", "gluon/backend"),
@@ -161,7 +196,28 @@ func (b *Backend) AddUser(ctx context.Context, userID string, conn connector.Con
 		}
 	}
 
-	user, err := newUser(ctx, userID, database, conn, storeBuilder, b.delim, b.imapLimits, uidValidityGenerator, b.panicHandler)
+	spoolMgr, err := spool.NewManager(b.getAppendSpoolDir(userID), b.appendConfig.SpoolMemoryLimit)
+	if err != nil {
+		onErrorExit()
+		return false, fmt.Errorf("failed to create append spool manager: %w", err)
+	}
+
+	quotaMgr := newAppendQuotaManager(database, conn)
+
+	user, err := newUser(
+		ctx,
+		userID,
+		database,
+		conn,
+		storeBuilder,
+		b.delim,
+		b.imapLimits,
+		uidValidityGenerator,
+		b.panicHandler,
+		spoolMgr,
+		quotaMgr,
+		b.appendConfig.JournalRetention,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -194,6 +250,10 @@ func (b *Backend) RemoveUser(ctx context.Context, userID string, removeFiles boo
 
 	if removeFiles {
 		if err := b.storeBuilder.Delete(b.getStoreDir(), userID); err != nil {
+			return err
+		}
+
+		if err := os.RemoveAll(b.getAppendSpoolDir(userID)); err != nil {
 			return err
 		}
 
@@ -340,6 +400,12 @@ func (b *Backend) getUserID(ctx context.Context, username string, password []byt
 
 func (b *Backend) getStoreDir() string {
 	return b.dataDir
+}
+
+// getAppendSpoolDir returns the per-user directory holding APPEND spool objects. It must stay
+// outside the on-disk store root, whose cleanup walks all files expecting message UUID names.
+func (b *Backend) getAppendSpoolDir(userID string) string {
+	return filepath.Join(b.dataDir, "appends", userID)
 }
 
 func (b *Backend) getDBDir() string {

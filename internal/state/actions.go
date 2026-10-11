@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -177,6 +178,266 @@ func (state *State) actionCreateMessage(
 		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet)},
 		st,
 	))
+
+	return updates, messageUID, nil
+}
+
+// acceptedCommitInfo identifies a message already accepted by the connector, captured so a
+// failing local transaction can still be recorded in the append journal.
+type acceptedCommitInfo struct {
+	remoteID   imap.MessageID
+	internalID imap.InternalMessageID
+}
+
+// callConnectorForUpload invokes the connector for a streamed upload. Connectors implementing
+// StreamingConnector receive a reader over the spool object; others get the buffered literal.
+// Draft uploads stream the header-erased literal rather than the raw spool object.
+func (state *State) callConnectorForUpload(
+	ctx context.Context,
+	tx db.Transaction,
+	mboxID imap.MailboxID,
+	upload Upload,
+	literal []byte,
+	flags imap.FlagSet,
+	date time.Time,
+	cameFromDrafts bool,
+) ([]Update, imap.InternalMessageID, imap.Message, []byte, error) {
+	if streaming, ok := state.user.GetRemote().(StreamingConnector); ok {
+		var reader io.Reader
+		if cameFromDrafts {
+			reader = bytes.NewReader(literal)
+		} else {
+			r, err := upload.Open()
+			if err != nil {
+				return nil, imap.InternalMessageID{}, imap.Message{}, nil, fmt.Errorf("failed to open spool object: %w", err)
+			}
+			defer r.Close()
+
+			reader = r
+		}
+
+		return streaming.CreateMessageFromReader(ctx, tx, mboxID, reader, upload.DeclaredSize(), flags, date)
+	}
+
+	return state.user.GetRemote().CreateMessage(ctx, tx, mboxID, literal, flags, date)
+}
+
+// actionCreateMessageFromUpload is the streaming counterpart of actionCreateMessage. It
+// drives the append journal through submitting/accepted/confirmed within the transaction.
+func (state *State) actionCreateMessageFromUpload(
+	ctx context.Context,
+	tx db.Transaction,
+	mboxID db.MailboxIDPair,
+	upload Upload,
+	literal []byte,
+	flags imap.FlagSet,
+	date time.Time,
+	isSelectedMailbox bool,
+	cameFromDrafts bool,
+	identityHash string,
+	originState int64,
+) ([]Update, imap.UID, *acceptedCommitInfo, error) {
+	var updates []Update
+
+	now := time.Now()
+
+	if err := tx.SetAppendJournalSubmitting(
+		ctx,
+		upload.AttemptID(),
+		identityHash,
+		upload.ContentHash(),
+		mboxID.InternalID,
+		originState,
+		flags.ToSliceUnsorted(),
+		date,
+		now,
+	); err != nil {
+		return nil, 0, nil, err
+	}
+
+	createUpdates, internalID, res, newLiteral, err := state.callConnectorForUpload(
+		ctx, tx, mboxID.RemoteID, upload, literal, flags, date, cameFromDrafts,
+	)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	updates = append(updates, createUpdates...)
+	accepted := &acceptedCommitInfo{remoteID: res.ID, internalID: internalID}
+
+	{
+		// Handle the case where duplicate messages can return the same remote ID.
+		knownInternalID, knownErr := tx.GetMessageIDFromRemoteID(ctx, res.ID)
+		if knownErr != nil && !db.IsErrNotFound(knownErr) {
+			return nil, 0, nil, knownErr
+		}
+
+		if knownErr == nil {
+			if cameFromDrafts {
+				observability.AddOtherMetric(ctx, metrics.GenerateAppendToDraftsMustNotReturnExistingRemoteID())
+				state.log.Errorf("Append to drafts must not return an existing RemoteID (Remote=%v, Internal=%v)", res.ID, knownInternalID.ShortID())
+
+				return nil, 0, nil, fmt.Errorf("append to drafts returned an existing remote ID")
+			}
+
+			state.log.Debugf("Deduped message detected, adding existing %v message to mailbox instead.", knownInternalID.ShortID())
+
+			if err := tx.SetAppendJournalAccepted(ctx, upload.AttemptID(), res.ID, knownInternalID, now); err != nil {
+				return nil, 0, nil, err
+			}
+
+			addMsgToMBoxUpdates, result, err := state.actionAddMessagesToMailbox(
+				ctx,
+				tx,
+				[]db.MessageIDPair{{InternalID: knownInternalID, RemoteID: res.ID}},
+				mboxID,
+				isSelectedMailbox,
+			)
+			if err != nil {
+				return nil, 0, nil, err
+			}
+
+			if err := tx.SetAppendJournalConfirmed(ctx, upload.AttemptID(), mboxID.InternalID, result[0].UID, now); err != nil {
+				return nil, 0, nil, err
+			}
+
+			return append(updates, addMsgToMBoxUpdates...), result[0].UID, accepted, nil
+		}
+	}
+
+	if len(newLiteral) == 0 {
+		newLiteral = literal
+	}
+
+	if err := tx.SetAppendJournalAccepted(ctx, upload.AttemptID(), res.ID, internalID, now); err != nil {
+		return nil, 0, nil, err
+	}
+
+	parsedMessage, err := imap.NewParsedMessage(newLiteral)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	literalWithHeader, literalSize, err := rfc822.SetHeaderValueNoMemCopy(newLiteral, ids.InternalIDKey, internalID.String())
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("failed to set internal ID: %w", err)
+	}
+
+	if err := state.user.GetStore().SetUnchecked(internalID, literalWithHeader); err != nil {
+		return nil, 0, nil, fmt.Errorf("failed to store message literal: %w", err)
+	}
+
+	req := db.CreateMessageReq{
+		Message:     res,
+		LiteralSize: literalSize,
+		Body:        parsedMessage.Body,
+		Structure:   parsedMessage.Structure,
+		Envelope:    parsedMessage.Envelope,
+		InternalID:  internalID,
+	}
+
+	messageUID, flagSet, err := tx.CreateMessageAndAddToMailbox(ctx, mboxID.InternalID, &req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+
+	if err := tx.SetAppendJournalConfirmed(ctx, upload.AttemptID(), mboxID.InternalID, messageUID, now); err != nil {
+		return nil, 0, nil, err
+	}
+
+	var st *State
+
+	if isSelectedMailbox {
+		st = state
+	}
+
+	updates = append(updates, newExistsStateUpdateWithExists(
+		mboxID.InternalID,
+		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet)},
+		st,
+	))
+
+	return updates, messageUID, accepted, nil
+}
+
+// rebuildAcceptedAppend completes the local commit for an append already accepted by the
+// connector (journal status "accepted"). The connector must not be called again.
+func (state *State) rebuildAcceptedAppend(
+	ctx context.Context,
+	tx db.Transaction,
+	entry *db.AppendJournalEntry,
+	isSelectedMailbox bool,
+) ([]Update, imap.UID, error) {
+	var (
+		literal []byte
+		err     error
+	)
+
+	if reader, openErr := state.user.OpenSpool(entry.AttemptID); openErr == nil {
+		literal, err = io.ReadAll(reader)
+		_ = reader.Close()
+
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to read recovered spool object: %w", err)
+		}
+	} else {
+		literal, err = state.user.GetRemote().GetMessageLiteral(ctx, entry.RemoteID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to recover accepted append literal: %w", err)
+		}
+	}
+
+	parsedMessage, err := imap.NewParsedMessage(literal)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	literalWithHeader, literalSize, err := rfc822.SetHeaderValueNoMemCopy(literal, ids.InternalIDKey, entry.InternalID.String())
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to set internal ID: %w", err)
+	}
+
+	if err := state.user.GetStore().SetUnchecked(entry.InternalID, literalWithHeader); err != nil {
+		return nil, 0, fmt.Errorf("failed to store recovered message literal: %w", err)
+	}
+
+	flags := imap.NewFlagSetFromSlice(entry.Flags)
+
+	req := db.CreateMessageReq{
+		Message: imap.Message{
+			ID:    entry.RemoteID,
+			Flags: flags,
+			Date:  entry.Date,
+		},
+		LiteralSize: literalSize,
+		Body:        parsedMessage.Body,
+		Structure:   parsedMessage.Structure,
+		Envelope:    parsedMessage.Envelope,
+		InternalID:  entry.InternalID,
+	}
+
+	messageUID, flagSet, err := tx.CreateMessageAndAddToMailbox(ctx, entry.MailboxInternalID, &req)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if err := tx.SetAppendJournalConfirmed(ctx, entry.AttemptID, entry.MailboxInternalID, messageUID, time.Now()); err != nil {
+		return nil, 0, err
+	}
+
+	var st *State
+
+	if isSelectedMailbox {
+		st = state
+	}
+
+	updates := []Update{
+		newExistsStateUpdateWithExists(
+			entry.MailboxInternalID,
+			[]*exists{newExists(db.MessageIDPair{InternalID: entry.InternalID, RemoteID: entry.RemoteID}, messageUID, flagSet)},
+			st,
+		),
+	}
 
 	return updates, messageUID, nil
 }

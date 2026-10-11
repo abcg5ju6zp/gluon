@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"io"
 
 	"github.com/ProtonMail/gluon/db"
 	"github.com/ProtonMail/gluon/imap"
@@ -92,4 +93,21 @@ func (s *StateUserInterfaceImpl) GetRecoveryMailboxID() db.MailboxIDPair {
 
 func (s *StateUserInterfaceImpl) GetRecoveredMessageHashesMap() *utils.MessageHashesMap {
 	return s.u.recoveredMessageHashes
+}
+
+func (s *StateUserInterfaceImpl) BeginAppendUpload(ctx context.Context, declaredSize int64) (state.Upload, error) {
+	return s.u.beginAppendUpload(ctx, declaredSize)
+}
+
+func (s *StateUserInterfaceImpl) OpenSpool(attemptID string) (io.ReadSeekCloser, error) {
+	obj, err := s.u.spool.Open(attemptID)
+	if err != nil {
+		return nil, err
+	}
+
+	return obj.Open()
+}
+
+func (s *StateUserInterfaceImpl) RemoveSpool(attemptID string) error {
+	return s.u.spool.Remove(attemptID)
 }

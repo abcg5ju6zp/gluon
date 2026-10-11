@@ -12,6 +12,18 @@ type Append struct {
 	Flags    []string
 	DateTime time.Time
 	Literal  []byte
+
+	// LiteralSize is the declared size of the literal, including streamed uploads where
+	// Literal is nil.
+	LiteralSize int
+
+	// NonSynchronous is true when the client used the RFC 7888 non-synchronizing literal
+	// form ("{<n>+}").
+	NonSynchronous bool
+
+	// Upload holds the opaque, session-owned handle for a streamed literal. It is nil when
+	// the literal was buffered the legacy way (Literal populated).
+	Upload any
 }
 
 func (l Append) String() string {
@@ -24,10 +36,12 @@ func (l Append) String() string {
 }
 
 func (l Append) SanitizedString() string {
-	return fmt.Sprintf("APPEND '%v' Flags='%v' DateTime='%v'",
+	return fmt.Sprintf("APPEND '%v' Flags='%v' DateTime='%v' Size=%v NonSync=%v",
 		sanitizeString(l.Mailbox),
 		l.Flags,
 		l.DateTime,
+		l.LiteralSize,
+		l.NonSynchronous,
 	)
 }
 
@@ -35,9 +49,11 @@ func (l Append) HasDateTime() bool {
 	return l.DateTime != time.Time{}
 }
 
-type AppendCommandParser struct{}
+type AppendCommandParser struct {
+	sinkFactory AppendLiteralSinkFactory
+}
 
-func (AppendCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
+func (a *AppendCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
 	if err := p.Consume(rfcparser.TokenTypeSP, "expected space after command"); err != nil {
 		return nil, err
 	}
@@ -82,16 +98,19 @@ func (AppendCommandParser) FromParser(p *rfcparser.Parser) (Payload, error) {
 		}
 	}
 
-	// read literal.
-	literal, err := p.ParseLiteral()
+	// read literal, optionally streaming it through a sink.
+	literal, upload, size, nonSync, err := parseAppendLiteral(p, a.sinkFactory)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Append{
-		Mailbox:  mailbox.Value,
-		Literal:  literal,
-		Flags:    appendFlags,
-		DateTime: dateTime,
+		Mailbox:        mailbox.Value,
+		Literal:        literal,
+		Flags:          appendFlags,
+		DateTime:       dateTime,
+		LiteralSize:    size,
+		NonSynchronous: nonSync,
+		Upload:         upload,
 	}, nil
 }

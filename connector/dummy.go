@@ -3,6 +3,9 @@ package connector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -59,6 +62,17 @@ type Dummy struct {
 	allowMessageCreateWithUnknownMailboxID bool
 
 	updatesAllowedToFail int32
+
+	// contentAddressed makes CreateMessage idempotent: a deterministic remote ID derived
+	// from the append parameters is reused on repeat submissions (e.g. crash recovery).
+	contentAddressed atomic.Bool
+
+	// appendCreateCount counts how many brand new remote messages CreateMessage produced
+	// (idempotent repeat submissions are not counted).
+	appendCreateCount atomic.Int64
+
+	// quotaBytes limits the total stored bytes when positive; zero means unlimited.
+	quotaBytes atomic.Int64
 }
 
 func NewDummy(usernames []string, password []byte, period time.Duration, flags, permFlags, attrs imap.FlagSet) *Dummy {
@@ -172,6 +186,39 @@ func (conn *Dummy) CreateMessage(ctx context.Context, _ IMAPStateWrite, mboxID i
 		return imap.Message{}, nil, err
 	}
 
+	// Content-addressed mode: the same append parameters always map to the same remote ID,
+	// which makes repeated submissions after a crash/reconnect idempotent.
+	if conn.contentAddressed.Load() {
+		messageID := contentAddressedMessageID(mboxID, flags, date, literal)
+		if conn.state.hasMessage(messageID) {
+			return conn.state.storedMessage(messageID), literal, nil
+		}
+
+		conn.appendCreateCount.Add(1)
+
+		message := conn.state.createMessageWithID(
+			messageID,
+			mboxID,
+			literal,
+			parsed,
+			flags.ContainsUnchecked(imap.FlagSeenLowerCase),
+			flags.ContainsUnchecked(imap.FlagFlaggedLowerCase),
+			flags,
+			date,
+		)
+
+		conn.pushUpdate(imap.NewMessagesCreated(conn.allowMessageCreateWithUnknownMailboxID, &imap.MessageCreated{
+			Message:       message,
+			Literal:       literal,
+			MailboxIDs:    []imap.MailboxID{mboxID},
+			ParsedMessage: parsed,
+		}))
+
+		return message, literal, nil
+	}
+
+	conn.appendCreateCount.Add(1)
+
 	message := conn.state.createMessage(
 		mboxID,
 		literal,
@@ -192,6 +239,53 @@ func (conn *Dummy) CreateMessage(ctx context.Context, _ IMAPStateWrite, mboxID i
 	conn.pushUpdate(update)
 
 	return message, literal, nil
+}
+
+// GetQuotaBytes implements QuotaConnector. A zero/negative value means unlimited.
+func (conn *Dummy) GetQuotaBytes(_ context.Context) (int64, error) {
+	return conn.quotaBytes.Load(), nil
+}
+
+// SetQuotaBytes configures the reported user quota in bytes; zero disables the limit.
+func (conn *Dummy) SetQuotaBytes(limit int64) {
+	conn.quotaBytes.Store(limit)
+}
+
+// SetContentAddressedAppends toggles deterministic, idempotent remote IDs for APPEND.
+func (conn *Dummy) SetContentAddressedAppends(enabled bool) {
+	conn.contentAddressed.Store(enabled)
+}
+
+// GetAppendCreateCount returns how many new remote messages CreateMessage produced.
+func (conn *Dummy) GetAppendCreateCount() int64 {
+	return conn.appendCreateCount.Load()
+}
+
+func contentAddressedMessageID(mboxID imap.MailboxID, flags imap.FlagSet, date time.Time, literal []byte) imap.MessageID {
+	normalizedFlags := flags.ToSliceUnsorted()
+	slices.Sort(normalizedFlags)
+
+	h := sha256.New()
+	_, _ = h.Write([]byte(mboxID))
+	_, _ = h.Write([]byte{0})
+
+	for _, f := range normalizedFlags {
+		_, _ = h.Write([]byte(f))
+		_, _ = h.Write([]byte{1})
+	}
+
+	_, _ = h.Write([]byte{0})
+
+	var dateBytes [8]byte
+	if !date.IsZero() {
+		binary.BigEndian.PutUint64(dateBytes[:], uint64(date.Unix()))
+	}
+
+	_, _ = h.Write(dateBytes[:])
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(literal)
+
+	return imap.MessageID("ca-" + hex.EncodeToString(h.Sum(nil)))
 }
 
 func (conn *Dummy) AddMessagesToMailbox(_ context.Context, _ IMAPStateWrite, messageIDs []imap.MessageID, mboxID imap.MailboxID) error {

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ProtonMail/gluon/async"
 	"github.com/ProtonMail/gluon/connector"
 	"github.com/ProtonMail/gluon/db"
 	"github.com/ProtonMail/gluon/imap"
 	"github.com/ProtonMail/gluon/internal/ids"
+	"github.com/ProtonMail/gluon/internal/spool"
 	"github.com/ProtonMail/gluon/internal/state"
 	"github.com/ProtonMail/gluon/internal/unleash"
 	"github.com/ProtonMail/gluon/internal/unleash/featureflags"
@@ -52,6 +54,11 @@ type user struct {
 
 	recoveredMessageHashes *utils.MessageHashesMap
 
+	// spool backs streaming APPEND receptions; quota reserves their size against the user quota.
+	spool   *spool.Manager
+	quota   *appendQuotaManager
+	journalRetention time.Duration
+
 	log *logrus.Entry
 }
 
@@ -65,6 +72,9 @@ func newUser(
 	imapLimits limits.IMAP,
 	uidValidityGenerator imap.UIDValidityGenerator,
 	panicHandler async.PanicHandler,
+	spoolManager *spool.Manager,
+	quotaManager *appendQuotaManager,
+	journalRetention time.Duration,
 ) (*user, error) {
 	recoveredMessageHashes := utils.NewMessageHashesMap()
 
@@ -141,6 +151,10 @@ func newUser(
 
 		recoveredMessageHashes: recoveredMessageHashes,
 
+		spool:            spoolManager,
+		quota:            quotaManager,
+		journalRetention: journalRetention,
+
 		log: log,
 	}
 
@@ -158,6 +172,10 @@ func newUser(
 
 	if err := user.cleanupStaleStoreData(ctx); err != nil {
 		log.WithError(err).Error("Failed to cleanup stale store data")
+	}
+
+	if err := user.recoverPendingAppends(ctx); err != nil {
+		log.WithError(err).Error("Failed to recover interrupted appends")
 	}
 
 	user.updateWG.Add(1)

@@ -48,6 +48,10 @@ type serverBuilder struct {
 	featureFlagProvider      unleash.FeatureFlagValueProvider
 	connectionRollingCounter *connectioncounter.RollingCounter
 	connectionLimiter        connectionlimiter.ConnectionLimiter
+
+	appendSpoolMemoryLimit int64
+	appendJournalRetention time.Duration
+	appendReadTimeout      time.Duration
 }
 
 func newBuilder() (*serverBuilder, error) {
@@ -63,6 +67,9 @@ func newBuilder() (*serverBuilder, error) {
 		dbCI:                     sqlite3.NewBuilder(),
 		observabilitySender:      nil,
 		connectionRollingCounter: nil,
+		appendSpoolMemoryLimit:   256 * 1024,
+		appendJournalRetention:   24 * time.Hour,
+		appendReadTimeout:        5 * time.Minute,
 	}, nil
 }
 
@@ -102,6 +109,10 @@ func (builder *serverBuilder) build() (*Server, error) {
 		builder.imapLimits,
 		builder.panicHandler,
 		builder.dbCI,
+		backend.AppendConfig{
+			SpoolMemoryLimit: builder.appendSpoolMemoryLimit,
+			JournalRetention: builder.appendJournalRetention,
+		},
 	)
 	if err != nil {
 		return nil, err
@@ -143,7 +154,8 @@ func (builder *serverBuilder) build() (*Server, error) {
 		observabilitySender:      builder.observabilitySender,
 		connectionRollingCounter: builder.connectionRollingCounter,
 		featureFlagProvider:      builder.featureFlagProvider,
-		connectionLimiter:        builder.connectionLimiter,
+		connectionLimiter:       builder.connectionLimiter,
+		appendReadTimeout:       builder.appendReadTimeout,
 	}
 
 	return s, nil

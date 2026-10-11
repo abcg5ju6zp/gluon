@@ -80,6 +80,9 @@ type serverOptions struct {
 	reporter                reporter.Reporter
 	uidValidityGenerator    imap.UIDValidityGenerator
 	database                db.ClientInterface
+	appendSpoolMemoryLimit  int64
+	appendReadTimeout       time.Duration
+	appendJournalRetention  time.Duration
 }
 
 func (s *serverOptions) defaultUsername() string {
@@ -252,6 +255,36 @@ func withDisableIMAPAuthenticate() serverOption {
 	return &disableIMAPAuthenticateOption{}
 }
 
+type appendSpoolMemoryLimitOption struct{ limit int64 }
+
+func (o *appendSpoolMemoryLimitOption) apply(options *serverOptions) {
+	options.appendSpoolMemoryLimit = o.limit
+}
+
+func withAppendSpoolMemoryLimit(limit int64) serverOption {
+	return &appendSpoolMemoryLimitOption{limit: limit}
+}
+
+type appendReadTimeoutOption struct{ timeout time.Duration }
+
+func (o *appendReadTimeoutOption) apply(options *serverOptions) {
+	options.appendReadTimeout = o.timeout
+}
+
+func withAppendReadTimeout(timeout time.Duration) serverOption {
+	return &appendReadTimeoutOption{timeout: timeout}
+}
+
+type appendJournalRetentionOption struct{ retention time.Duration }
+
+func (o *appendJournalRetentionOption) apply(options *serverOptions) {
+	options.appendJournalRetention = o.retention
+}
+
+func withAppendJournalRetention(retention time.Duration) serverOption {
+	return &appendJournalRetentionOption{retention: retention}
+}
+
 func defaultServerOptions(tb testing.TB, modifiers ...serverOption) *serverOptions {
 	options := &serverOptions{
 		credentials: []credentials{{
@@ -332,6 +365,18 @@ func runServer(tb testing.TB, options *serverOptions, tests func(session *testSe
 
 	if options.disableIMAPAuthenticate {
 		gluonOptions = append(gluonOptions, gluon.WithDisableIMAPAuthenticate())
+	}
+
+	if options.appendSpoolMemoryLimit > 0 {
+		gluonOptions = append(gluonOptions, gluon.WithAppendSpoolMemoryLimit(options.appendSpoolMemoryLimit))
+	}
+
+	if options.appendReadTimeout > 0 {
+		gluonOptions = append(gluonOptions, gluon.WithAppendReadTimeout(options.appendReadTimeout))
+	}
+
+	if options.appendJournalRetention > 0 {
+		gluonOptions = append(gluonOptions, gluon.WithAppendJournalRetention(options.appendJournalRetention))
 	}
 
 	// Create a new gluon server.
