@@ -34,16 +34,62 @@ func (s *Session) handleSearch(ctx context.Context, tag string, cmd *command.Sea
 		decoder = encoding.Nop.NewDecoder()
 	}
 
-	seq, err := mailbox.Search(ctx, cmd.Keys, decoder)
+	matches, err := mailbox.Search(ctx, cmd.Keys, decoder)
 	if err != nil {
 		return nil, err
 	}
 
+	asUID := contexts.IsUID(ctx)
+
+	seqs := make([]uint32, 0, len(matches))
+
+	for _, match := range matches {
+		seqs = append(seqs, match.Number(asUID))
+	}
+
 	select {
-	case ch <- response.Search(seq...):
+	case ch <- response.Search(seqs...):
 
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+
+	// RFC 8474 SEARCH RETURN (EMAILID)/(THREADID) correlators. The sequence number in the
+	// correlator is always the message sequence number, even for UID SEARCH.
+	var (
+		wantEmailID  bool
+		wantThreadID bool
+	)
+
+	for _, option := range cmd.ReturnOptions {
+		switch option {
+		case command.SearchReturnOptionEmailID:
+			wantEmailID = true
+		case command.SearchReturnOptionThreadID:
+			wantThreadID = true
+		}
+	}
+
+	if wantEmailID || wantThreadID {
+		for _, match := range matches {
+			// Emit correlators in the order the options were requested.
+			for _, option := range cmd.ReturnOptions {
+				var item response.Response
+
+				switch option {
+				case command.SearchReturnOptionEmailID:
+					item = response.EmailIDSearchCorrelator(match.Seq, match.EmailID)
+				case command.SearchReturnOptionThreadID:
+					item = response.ThreadIDSearchCorrelator(match.Seq, match.ThreadID)
+				}
+
+				select {
+				case ch <- item:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
 	}
 
 	var items []response.Item

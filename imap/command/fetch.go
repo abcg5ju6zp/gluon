@@ -161,6 +161,10 @@ func handleFetchAttribute(name rfcparser.String, p *rfcparser.Parser) (FetchAttr
 		return &FetchAttributeBodyStructure{}, nil
 	case "uid":
 		return &FetchAttributeUID{}, nil
+	case "emailid":
+		return &FetchAttributeEmailID{}, nil
+	case "threadid":
+		return &FetchAttributeThreadID{}, nil
 	case "rfc":
 		return handleRFC822FetchAttribute(p)
 	case "body":

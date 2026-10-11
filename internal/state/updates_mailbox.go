@@ -52,7 +52,7 @@ func MoveMessagesFromMailbox(
 			return newExists(db.MessageIDPair{
 				InternalID: uid.InternalID,
 				RemoteID:   uid.RemoteID,
-			}, uid.UID, uid.GetFlagSet())
+			}, uid.UID, uid.GetFlagSet(), uid.ObjectID, uid.ThreadID)
 		})
 		stateUpdates = append(stateUpdates, newExistsStateUpdateWithExists(mboxToID, responders, s))
 	}
@@ -95,7 +95,7 @@ func AddMessagesToMailbox(ctx context.Context,
 		return newExists(db.MessageIDPair{
 			InternalID: uid.InternalID,
 			RemoteID:   uid.RemoteID,
-		}, uid.UID, uid.GetFlagSet())
+		}, uid.UID, uid.GetFlagSet(), uid.ObjectID, uid.ThreadID)
 	})
 
 	return messageUIDs, newExistsStateUpdateWithExists(mboxID, responders, s), nil

@@ -23,6 +23,7 @@ func TestSelect(t *testing.T) {
 			`* OK [PERMANENTFLAGS (\Deleted \Flagged \Seen)] Flags permitted`,
 			`* OK [UIDNEXT 3] Predicted next UID`,
 			`* OK [UIDVALIDITY 1] UIDs valid`)
+		c.Sx(`\* OK \[MAILBOXID \([0-9a-f-]+\)\] Mailbox id`)
 		c.S("A006 OK [READ-WRITE] SELECT")
 
 		// Selecting again modifies the RECENT value.
@@ -34,6 +35,7 @@ func TestSelect(t *testing.T) {
 			`* OK [PERMANENTFLAGS (\Deleted \Flagged \Seen)] Flags permitted`,
 			`* OK [UIDNEXT 3] Predicted next UID`,
 			`* OK [UIDVALIDITY 1] UIDs valid`)
+		c.Sx(`\* OK \[MAILBOXID \([0-9a-f-]+\)\] Mailbox id`)
 		c.S("A006 OK [READ-WRITE] SELECT")
 
 		c.C("A007 select Archive")
@@ -43,6 +45,7 @@ func TestSelect(t *testing.T) {
 			`* OK [PERMANENTFLAGS (\Deleted \Flagged \Seen)] Flags permitted`,
 			`* OK [UIDNEXT 2] Predicted next UID`,
 			`* OK [UIDVALIDITY 1] UIDs valid`)
+		c.Sx(`\* OK \[MAILBOXID \([0-9a-f-]+\)\] Mailbox id`)
 		c.S(`A007 OK [READ-WRITE] SELECT`)
 	})
 }

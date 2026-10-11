@@ -401,22 +401,28 @@ func (w WriteTracer) CreateMessageAndAddToMailbox(
 	return w.TX.CreateMessageAndAddToMailbox(ctx, mbox, req)
 }
 
-func (w WriteTracer) MarkMessageAsDeleted(ctx context.Context, id imap.InternalMessageID) error {
+func (w WriteTracer) MarkMessageAsDeleted(ctx context.Context, id imap.InternalMessageID) ([]imap.InternalMessageID, error) {
 	w.Entry.Tracef("MarkMessageAsDeleted")
 
 	return w.TX.MarkMessageAsDeleted(ctx, id)
 }
 
-func (w WriteTracer) MarkMessageAsDeletedAndAssignRandomRemoteID(ctx context.Context, id imap.InternalMessageID) error {
-	w.Entry.Tracef("MarkMessageAsDeletedAndAssignRandomRemoteID")
-
-	return w.TX.MarkMessageAsDeletedAndAssignRandomRemoteID(ctx, id)
-}
-
-func (w WriteTracer) MarkMessageAsDeletedWithRemoteID(ctx context.Context, id imap.MessageID) error {
+func (w WriteTracer) MarkMessageAsDeletedWithRemoteID(ctx context.Context, id imap.MessageID) ([]imap.InternalMessageID, error) {
 	w.Entry.Tracef("MarkMessageAsDeletedWithRemoteID")
 
 	return w.TX.MarkMessageAsDeletedWithRemoteID(ctx, id)
+}
+
+func (w WriteTracer) ReplaceMessageLiteral(ctx context.Context, oldInternalID imap.InternalMessageID, req *db.CreateMessageReq) ([]db.ThreadAssignment, error) {
+	w.Entry.Tracef("ReplaceMessageLiteral")
+
+	return w.TX.ReplaceMessageLiteral(ctx, oldInternalID, req)
+}
+
+func (w WriteTracer) RecomputeMessageThreads(ctx context.Context, seed []imap.InternalMessageID) ([]db.ThreadAssignment, error) {
+	w.Entry.Tracef("RecomputeMessageThreads")
+
+	return w.TX.RecomputeMessageThreads(ctx, seed)
 }
 
 func (w WriteTracer) DeleteMessages(ctx context.Context, ids []imap.InternalMessageID) error {

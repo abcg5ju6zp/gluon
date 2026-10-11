@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/ProtonMail/gluon/imap"
+	"github.com/bradenaw/juniper/xslices"
 )
 
 type SnapFilter interface {
@@ -85,4 +86,10 @@ func (f *AnyMessageIDStateFilter) Filter(s *State) bool {
 	}
 
 	return slices.ContainsFunc(f.MessageIDs, s.snap.hasMessage)
+}
+
+func (f *AnyMessageIDStateFilter) String() string {
+	return fmt.Sprintf("any message in %v", xslices.Map(f.MessageIDs, func(id imap.InternalMessageID) string {
+		return id.ShortID()
+	}))
 }

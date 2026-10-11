@@ -13,6 +13,7 @@ import (
 	"github.com/ProtonMail/gluon/internal/db_impl/sqlite3/utils"
 	v1 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v1"
 	v2 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v2"
+	v4 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v4"
 	"github.com/bradenaw/juniper/xmaps"
 	"github.com/bradenaw/juniper/xslices"
 )
@@ -261,8 +262,9 @@ func (r readOps) GetMailboxMessageCountAndUID(ctx context.Context, mboxID imap.I
 
 func (r readOps) GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID imap.InternalMailboxID) ([]db.SnapshotMessageResult, error) {
 	query := fmt.Sprintf("SELECT `m`.`%[1]v`, GROUP_CONCAT(`f`.`%[2]v`) AS `flags`, `m`.`%[3]v`, `m`.`%[4]v`, "+
-		"`m`.`%[5]v`, `m`.`%[6]v` FROM %[9]v AS m "+
+		"`m`.`%[5]v`, `m`.`%[6]v`, `g`.`%[10]v`, `g`.`%[11]v` FROM %[9]v AS m "+
 		"LEFT JOIN `%[7]v` AS f ON `f`.`%[8]v` = `m`.`%[6]v` "+
+		"LEFT JOIN `%[12]v` AS g ON `g`.`%[13]v` = `m`.`%[6]v` "+
 		"GROUP BY `m`.`%[6]v` ORDER BY `m`.`%[5]v`",
 		v1.MailboxMessagesFieldMessageRemoteID,
 		v1.MessageFlagsFieldValue,
@@ -273,17 +275,28 @@ func (r readOps) GetMailboxMessageForNewSnapshot(ctx context.Context, mboxID ima
 		v1.MessageFlagsTableName,
 		v1.MessageFlagsFieldMessageID,
 		v1.MailboxMessageTableName(mboxID),
+		v4.MessagesFieldObjectID,
+		v4.MessagesFieldThreadID,
+		v1.MessagesTableName,
+		v1.MessagesFieldID,
 	)
 
 	return utils.MapQueryRowsFn(ctx, r.qw, query, func(scanner utils.RowScanner) (db.SnapshotMessageResult, error) {
 		var r db.SnapshotMessageResult
-		var flags sql.NullString
+		var flags, objectID, threadID sql.NullString
 
-		if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID); err != nil {
+		if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID, &objectID, &threadID); err != nil {
 			return db.SnapshotMessageResult{}, err
 		}
 
 		r.Flags = flags.String
+		if objectID.Valid {
+			r.ObjectID = imap.EmailID(objectID.String)
+		}
+
+		if threadID.Valid {
+			r.ThreadID = imap.ThreadID(threadID.String)
+		}
 
 		return r, nil
 	})
@@ -350,9 +363,10 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 
 	for _, chunk := range xslices.Chunk(messageIDs, db.ChunkLimit) {
 		query := fmt.Sprintf("SELECT `m`.`%[1]v`, GROUP_CONCAT(`f`.`%[2]v`) AS `flags`, `m`.`%[3]v`, `m`.`%[4]v`, "+
-			"`m`.`%[5]v`, `m`.`%[6]v` FROM %[9]v AS m "+
+			"`m`.`%[5]v`, `m`.`%[6]v`, `g`.`%[10]v`, `g`.`%[11]v` FROM %[9]v AS m "+
 			"LEFT JOIN `%[7]v` AS f ON `f`.`%[8]v` = `m`.`%[6]v` "+
-			"WHERE `m`.`%[6]v` IN (%[10]v) "+
+			"LEFT JOIN `%[12]v` AS g ON `g`.`%[13]v` = `m`.`%[6]v` "+
+			"WHERE `m`.`%[6]v` IN (%[14]v) "+
 			"GROUP BY `m`.`%[6]v` ORDER BY `m`.`%[5]v`",
 			v1.MailboxMessagesFieldMessageRemoteID,
 			v1.MessageFlagsFieldValue,
@@ -363,6 +377,10 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 			v1.MessageFlagsTableName,
 			v1.MessageFlagsFieldMessageID,
 			v1.MailboxMessageTableName(mboxID),
+			v4.MessagesFieldObjectID,
+			v4.MessagesFieldThreadID,
+			v1.MessagesTableName,
+			v1.MessagesFieldID,
 			utils.GenSQLIn(len(chunk)),
 		)
 
@@ -370,13 +388,20 @@ func (r readOps) GetMailboxMessageUIDsWithFlagsAfterAddOrUIDBump(ctx context.Con
 
 		r, err := utils.MapQueryRowsFn(ctx, r.qw, query, func(scanner utils.RowScanner) (db.UIDWithFlags, error) {
 			var r db.UIDWithFlags
-			var flags sql.NullString
+			var flags, objectID, threadID sql.NullString
 
-			if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID); err != nil {
+			if err := scanner.Scan(&r.RemoteID, &flags, &r.Recent, &r.Deleted, &r.UID, &r.InternalID, &objectID, &threadID); err != nil {
 				return db.UIDWithFlags{}, err
 			}
 
 			r.Flags = flags.String
+			if objectID.Valid {
+				r.ObjectID = imap.EmailID(objectID.String)
+			}
+
+			if threadID.Valid {
+				r.ThreadID = imap.ThreadID(threadID.String)
+			}
 
 			return r, nil
 		}, args...)

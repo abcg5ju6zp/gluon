@@ -14,8 +14,28 @@ import (
 const maxSearchKeyDepth = 64
 
 type Search struct {
-	Charset string
-	Keys    []SearchKey
+	Charset       string
+	Keys          []SearchKey
+	ReturnOptions []SearchReturnOption
+}
+
+// SearchReturnOption is a RFC 4731/8474 SEARCH RETURN option.
+type SearchReturnOption int
+
+const (
+	SearchReturnOptionEmailID SearchReturnOption = iota
+	SearchReturnOptionThreadID
+)
+
+func (s SearchReturnOption) String() string {
+	switch s {
+	case SearchReturnOptionEmailID:
+		return "EMAILID"
+	case SearchReturnOptionThreadID:
+		return "THREADID"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 type SearchKey interface {
@@ -49,6 +69,8 @@ func (scp *SearchCommandParser) FromParser(p *rfcparser.Parser) (Payload, error)
 	//search          = "SEARCH" [SP "CHARSET" SP astring] 1*(SP search-key)
 	//                     ; CHARSET argument to MUST be registered with IANA
 	var keys []SearchKey
+
+	var returnOptions []SearchReturnOption
 
 	var charset string
 
@@ -130,6 +152,35 @@ func (scp *SearchCommandParser) FromParser(p *rfcparser.Parser) (Payload, error)
 			break
 		}
 
+		// SEARCH RETURN (RFC 4731/8474) appears after the search keys. Peek for a bare keyword;
+		// RETURN is detected before falling back to search-key parsing.
+		if p.Check(rfcparser.TokenTypeChar) {
+			keyword, err := readSearchKeyword(p)
+			if err != nil {
+				return nil, err
+			}
+
+			if keyword.Value == "return" {
+				options, err := parseSearchReturnOptions(p)
+				if err != nil {
+					return nil, err
+				}
+
+				returnOptions = options
+
+				break
+			}
+
+			key, err := handleSearchKey(keyword, p, 0)
+			if err != nil {
+				return nil, err
+			}
+
+			keys = append(keys, key)
+
+			continue
+		}
+
 		key, err := parseSearchKey(p, 0)
 		if err != nil {
 			return nil, err
@@ -143,9 +194,66 @@ func (scp *SearchCommandParser) FromParser(p *rfcparser.Parser) (Payload, error)
 	}
 
 	return &Search{
-		Charset: charset,
-		Keys:    keys,
+		Charset:       charset,
+		Keys:          keys,
+		ReturnOptions: returnOptions,
 	}, nil
+}
+
+// parseSearchReturnOptions parses `RETURN "(" return-option *(SP return-option) ")"`.
+// Only the RFC 8474 EMAILID and THREADID options are supported; other RFC 4731 result options are
+// rejected since the server does not implement ESEARCH result sets.
+func parseSearchReturnOptions(p *rfcparser.Parser) ([]SearchReturnOption, error) {
+	if err := p.Consume(rfcparser.TokenTypeSP, "expected space after RETURN"); err != nil {
+		return nil, err
+	}
+
+	if err := p.Consume(rfcparser.TokenTypeLParen, "expected ( for RETURN options"); err != nil {
+		return nil, err
+	}
+
+	var options []SearchReturnOption
+
+	parseOne := func() error {
+		option, err := p.CollectBytesWhileMatches(rfcparser.TokenTypeChar)
+		if err != nil {
+			return err
+		}
+
+		switch option.IntoString().ToLower().Value {
+		case "emailid":
+			options = append(options, SearchReturnOptionEmailID)
+		case "threadid":
+			options = append(options, SearchReturnOptionThreadID)
+		default:
+			return p.MakeErrorAtOffset(fmt.Sprintf("unsupported SEARCH RETURN option '%v'", option.Value), option.Offset)
+		}
+
+		return nil
+	}
+
+	if err := parseOne(); err != nil {
+		return nil, err
+	}
+
+	for {
+		ok, err := p.Matches(rfcparser.TokenTypeSP)
+		if err != nil {
+			return nil, err
+		} else if !ok {
+			break
+		}
+
+		if err := parseOne(); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := p.Consume(rfcparser.TokenTypeRParen, "expected ) for RETURN options end"); err != nil {
+		return nil, err
+	}
+
+	return options, nil
 }
 
 func parseSearchKey(p *rfcparser.Parser, depth int) (SearchKey, error) {
@@ -250,6 +358,22 @@ func handleSearchKey(keyword rfcparser.String, p *rfcparser.Parser, depth int) (
 	switch keyword.Value {
 	case "all":
 		return &SearchKeyAll{}, nil
+
+	case "emailid":
+		value, err := parseStringKeyAString(p)
+		if err != nil {
+			return nil, err
+		}
+
+		return &SearchKeyEmailID{Value: value}, nil
+
+	case "threadid":
+		value, err := parseStringKeyAString(p)
+		if err != nil {
+			return nil, err
+		}
+
+		return &SearchKeyThreadID{Value: value}, nil
 
 	case "answered":
 		return &SearchKeyAnswered{}, nil

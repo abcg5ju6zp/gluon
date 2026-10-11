@@ -47,6 +47,8 @@ func (s *Session) handleSelect(ctx context.Context, tag string, cmd *command.Sel
 			ch <- response.Ok().WithItems(response.ItemUnseen(uint32(unseen.Seq))).WithMessage("Unseen messages")
 		}
 
+		ch <- response.Ok().WithItems(response.ItemMailboxIDCode(mailbox.ObjectID())).WithMessage("Mailbox id")
+
 		return nil
 	}); err != nil {
 		return err

@@ -86,6 +86,20 @@ func (f FetchAttributeUID) String() string {
 	return "UID"
 }
 
+// FetchAttributeEmailID implements the RFC 8474 EMAILID FETCH message attribute.
+type FetchAttributeEmailID struct{}
+
+func (f FetchAttributeEmailID) String() string {
+	return "EMAILID"
+}
+
+// FetchAttributeThreadID implements the RFC 8474 THREADID FETCH message attribute.
+type FetchAttributeThreadID struct{}
+
+func (f FetchAttributeThreadID) String() string {
+	return "THREADID"
+}
+
 type BodySection interface {
 	String() string
 }

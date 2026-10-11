@@ -46,6 +46,8 @@ func (s *Session) handleExamine(ctx context.Context, tag string, cmd *command.Ex
 			ch <- response.Ok().WithItems(response.ItemUnseen(uint32(unseen.Seq)))
 		}
 
+		ch <- response.Ok().WithItems(response.ItemMailboxIDCode(mailbox.ObjectID())).WithMessage("Mailbox id")
+
 		return nil
 	}); err != nil {
 		return err

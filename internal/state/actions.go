@@ -11,11 +11,13 @@ import (
 	"github.com/ProtonMail/gluon/db"
 	"github.com/ProtonMail/gluon/imap"
 	"github.com/ProtonMail/gluon/internal/ids"
+	"github.com/ProtonMail/gluon/internal/thread"
 	"github.com/ProtonMail/gluon/observability"
 	"github.com/ProtonMail/gluon/observability/metrics"
 	pkgutils "github.com/ProtonMail/gluon/pkg/utils"
 	"github.com/ProtonMail/gluon/rfc822"
 	"github.com/bradenaw/juniper/xslices"
+	"github.com/google/uuid"
 )
 
 func (state *State) actionCreateAndGetMailbox(ctx context.Context, tx db.Transaction, name string, uidValidity imap.UID) ([]Update, *db.Mailbox, error) {
@@ -151,16 +153,25 @@ func (state *State) actionCreateMessage(
 		return nil, 0, fmt.Errorf("failed to store message literal: %w", err)
 	}
 
+	emailID := imap.EmailID(uuid.NewString())
+
 	req := db.CreateMessageReq{
-		Message:     res,
-		LiteralSize: literalSize,
-		Body:        parsedMessage.Body,
-		Structure:   parsedMessage.Structure,
-		Envelope:    parsedMessage.Envelope,
-		InternalID:  internalID,
+		Message:      res,
+		LiteralSize:  literalSize,
+		Body:         parsedMessage.Body,
+		Structure:    parsedMessage.Structure,
+		Envelope:     parsedMessage.Envelope,
+		InternalID:   internalID,
+		ObjectID:     emailID,
+		ThreadTokens: thread.ExtractTokens(newLiteral, internalID.String()),
 	}
 
 	messageUID, flagSet, err := tx.CreateMessageAndAddToMailbox(ctx, mboxID.InternalID, &req)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	threadAssignments, err := tx.RecomputeMessageThreads(ctx, []imap.InternalMessageID{internalID})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -172,13 +183,30 @@ func (state *State) actionCreateMessage(
 		st = state
 	}
 
+	threadID := threadIDForMessage(threadAssignments, internalID)
+
 	updates = append(updates, newExistsStateUpdateWithExists(
 		mboxID.InternalID,
-		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet)},
+		[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: res.ID}, messageUID, flagSet, emailID, threadID)},
 		st,
 	))
 
+	if len(threadAssignments) != 0 {
+		updates = append(updates, NewThreadIDsStateUpdate(threadAssignments))
+	}
+
 	return updates, messageUID, nil
+}
+
+// threadIDForMessage returns the assigned THREADID for the given message, if present.
+func threadIDForMessage(assignments []db.ThreadAssignment, id imap.InternalMessageID) imap.ThreadID {
+	for _, assignment := range assignments {
+		if assignment.InternalID == id {
+			return assignment.ThreadID
+		}
+	}
+
+	return ""
 }
 
 func (state *State) actionCreateRecoveredMessage(
@@ -206,17 +234,21 @@ func (state *State) actionCreateRecoveredMessage(
 		return nil, false, fmt.Errorf("failed to store message literal: %w", err)
 	}
 
+	emailID := imap.EmailID(uuid.NewString())
+
 	req := db.CreateMessageReq{
 		Message: imap.Message{
 			ID:    remoteID,
 			Flags: flags,
 			Date:  date,
 		},
-		LiteralSize: len(literal),
-		Body:        parsedMessage.Body,
-		Structure:   parsedMessage.Structure,
-		Envelope:    parsedMessage.Envelope,
-		InternalID:  internalID,
+		LiteralSize:  len(literal),
+		Body:         parsedMessage.Body,
+		Structure:    parsedMessage.Structure,
+		Envelope:     parsedMessage.Envelope,
+		InternalID:   internalID,
+		ObjectID:     emailID,
+		ThreadTokens: thread.ExtractTokens(literal, internalID.String()),
 	}
 
 	recoveryMBoxID := state.user.GetRecoveryMailboxID()
@@ -226,12 +258,23 @@ func (state *State) actionCreateRecoveredMessage(
 		return nil, false, err
 	}
 
+	threadAssignments, err := tx.RecomputeMessageThreads(ctx, []imap.InternalMessageID{internalID})
+	if err != nil {
+		return nil, false, err
+	}
+
+	threadID := threadIDForMessage(threadAssignments, internalID)
+
 	updates := []Update{
 		newExistsStateUpdateWithExists(
 			recoveryMBoxID.InternalID,
-			[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: remoteID}, messageUID, flagSet)},
+			[]*exists{newExists(db.MessageIDPair{InternalID: internalID, RemoteID: remoteID}, messageUID, flagSet, emailID, threadID)},
 			nil,
 		),
+	}
+
+	if len(threadAssignments) != 0 {
+		updates = append(updates, NewThreadIDsStateUpdate(threadAssignments))
 	}
 
 	return updates, false, nil
@@ -385,16 +428,27 @@ func (state *State) actionImportRecoveredMessage(
 	}
 
 	req := db.CreateMessageReq{
-		Message:     res,
-		LiteralSize: literalSize,
-		Body:        parsedMessage.Body,
-		Structure:   parsedMessage.Structure,
-		Envelope:    parsedMessage.Envelope,
-		InternalID:  internalID,
+		Message:      res,
+		LiteralSize:  literalSize,
+		Body:         parsedMessage.Body,
+		Structure:    parsedMessage.Structure,
+		Envelope:     parsedMessage.Envelope,
+		InternalID:   internalID,
+		ObjectID:     imap.EmailID(uuid.NewString()),
+		ThreadTokens: thread.ExtractTokens(newLiteral, internalID.String()),
 	}
 
 	if err := tx.CreateMessages(ctx, &req); err != nil {
 		return nil, db.MessageIDPair{}, false, err
+	}
+
+	threadAssignments, err := tx.RecomputeMessageThreads(ctx, []imap.InternalMessageID{internalID})
+	if err != nil {
+		return nil, db.MessageIDPair{}, false, err
+	}
+
+	if len(threadAssignments) != 0 {
+		updates = append(updates, NewThreadIDsStateUpdate(threadAssignments))
 	}
 
 	return updates, db.MessageIDPair{
@@ -446,6 +500,7 @@ func (state *State) actionMoveMessagesOutOfRecoveryMailbox(
 
 	ids := make([]db.MessageIDPair, 0, len(messageIDs))
 	oldInternalIDs := make([]imap.InternalMessageID, 0, len(messageIDs))
+	threadSeed := make([]imap.InternalMessageID, 0, len(messageIDs))
 
 	// Import messages to remote.
 	for _, id := range messageIDs {
@@ -455,9 +510,12 @@ func (state *State) actionMoveMessagesOutOfRecoveryMailbox(
 		}
 
 		if !deduped {
-			if err := tx.MarkMessageAsDeleted(ctx, id.InternalID); err != nil {
+			neighbors, err := tx.MarkMessageAsDeleted(ctx, id.InternalID)
+			if err != nil {
 				return nil, nil, err
 			}
+
+			threadSeed = append(threadSeed, neighbors...)
 		}
 
 		ids = append(ids, newID)
@@ -484,6 +542,21 @@ func (state *State) actionMoveMessagesOutOfRecoveryMailbox(
 	}
 
 	updates = append(updates, addToMboxUpdates...)
+
+	// Recompute threading for the union of all new messages and the neighborhoods left behind by
+	// the tombstoned recovery messages.
+	threadSeed = append(threadSeed, xslices.Map(ids, func(id db.MessageIDPair) imap.InternalMessageID {
+		return id.InternalID
+	})...)
+
+	threadAssignments, err := tx.RecomputeMessageThreads(ctx, threadSeed)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(threadAssignments) != 0 {
+		updates = append(updates, NewThreadIDsStateUpdate(threadAssignments))
+	}
 
 	return updates, uidWithFlags, nil
 }

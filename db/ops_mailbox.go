@@ -120,6 +120,8 @@ type SnapshotMessageResult struct {
 	Recent     bool                   `json:"recent"`
 	Deleted    bool                   `json:"deleted"`
 	Flags      string                 `json:"flags"`
+	ObjectID   imap.EmailID           `json:"object_id"`
+	ThreadID   imap.ThreadID          `json:"thread_id"`
 }
 
 func (msg *SnapshotMessageResult) GetFlagSet() imap.FlagSet {
@@ -150,6 +152,8 @@ type UIDWithFlags struct {
 	Recent     bool                   `json:"recent"`
 	Deleted    bool                   `json:"deleted"`
 	Flags      string                 `json:"flags"`
+	ObjectID   imap.EmailID           `json:"object_id"`
+	ThreadID   imap.ThreadID          `json:"thread_id"`
 }
 
 func (u *UIDWithFlags) GetFlagSet() imap.FlagSet {

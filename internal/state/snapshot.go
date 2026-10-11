@@ -35,6 +35,8 @@ func newSnapshot(ctx context.Context, state *State, client db.ReadOnly, mbox *db
 			db.MessageIDPair{InternalID: snapshotMessage.InternalID, RemoteID: snapshotMessage.RemoteID},
 			snapshotMessage.UID,
 			snapshotMessage.GetFlagSet(),
+			snapshotMessage.ObjectID,
+			snapshotMessage.ThreadID,
 		); err != nil {
 			return nil, err
 		}
@@ -237,19 +239,35 @@ func (snap *snapshot) getMessagesWithoutFlagCount(flag string) int {
 	})
 }
 
-func (snap *snapshot) appendMessage(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet) error {
+func (snap *snapshot) appendMessage(
+	messageID db.MessageIDPair,
+	uid imap.UID,
+	flags imap.FlagSet,
+	objectID imap.EmailID,
+	threadID imap.ThreadID,
+) error {
 	return snap.messages.insert(
 		messageID,
 		uid,
 		flags,
+		objectID,
+		threadID,
 	)
 }
 
-func (snap *snapshot) appendMessageFromOtherState(messageID db.MessageIDPair, uid imap.UID, flags imap.FlagSet) error {
+func (snap *snapshot) appendMessageFromOtherState(
+	messageID db.MessageIDPair,
+	uid imap.UID,
+	flags imap.FlagSet,
+	objectID imap.EmailID,
+	threadID imap.ThreadID,
+) error {
 	snap.messages.insertOutOfOrder(
 		messageID,
 		uid,
 		flags,
+		objectID,
+		threadID,
 	)
 
 	return nil
@@ -279,4 +297,8 @@ func (snap *snapshot) updateMessageRemoteID(internalID imap.InternalMessageID, r
 	}
 
 	return nil
+}
+
+func (snap *snapshot) updateMessageThreadID(internalID imap.InternalMessageID, threadID imap.ThreadID) bool {
+	return snap.messages.updateThreadID(internalID, threadID)
 }

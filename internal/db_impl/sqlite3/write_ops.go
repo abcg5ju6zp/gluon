@@ -2,6 +2,7 @@ package sqlite3
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,7 +12,10 @@ import (
 	"github.com/ProtonMail/gluon/internal/db_impl/sqlite3/utils"
 	v1 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v1"
 	v2 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v2"
+	v4 "github.com/ProtonMail/gluon/internal/db_impl/sqlite3/v4"
+	"github.com/ProtonMail/gluon/internal/thread"
 	"github.com/bradenaw/juniper/xslices"
+	"github.com/google/uuid"
 )
 
 type writeOps struct {
@@ -26,13 +30,16 @@ func (w writeOps) CreateMailbox(
 	flags, permFlags, attrs imap.FlagSet,
 	uidValidity imap.UID,
 ) (*db.Mailbox, error) {
+	objectID := imap.MailboxObjectID(uuid.NewString())
+
 	createMBoxQuery := fmt.Sprintf(
-		"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`) VALUES (?,?,?,?) RETURNING `%v`",
+		"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`, `%v`) VALUES (?,?,?,?,?) RETURNING `%v`",
 		v1.MailboxesTableName,
 		v1.MailboxesFieldRemoteID,
 		v1.MailboxesFieldName,
 		v1.MailboxesFieldUIDValidity,
 		v1.MailboxesFieldSubscribed,
+		v4.MailboxesFieldObjectID,
 		v1.MailboxesFieldID,
 	)
 
@@ -42,6 +49,7 @@ func (w writeOps) CreateMailbox(
 		name,
 		uidValidity,
 		true,
+		objectID,
 	)
 	if err != nil {
 		return nil, utils.MapLabelsUniqueConstraintError(
@@ -99,6 +107,7 @@ func (w writeOps) CreateMailbox(
 		Name:        name,
 		UIDValidity: uidValidity,
 		Subscribed:  true,
+		ObjectID:    objectID,
 	}, nil
 }
 
@@ -406,7 +415,7 @@ func (w writeOps) SetMailboxUIDValidity(ctx context.Context, mboxID imap.Interna
 func (w writeOps) CreateMessages(ctx context.Context, reqs ...*db.CreateMessageReq) error {
 	for _, chunk := range xslices.Chunk(reqs, db.ChunkLimit) {
 		createMessageQuery := fmt.Sprintf(
-			"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`) VALUES %v",
+			"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`) VALUES %v",
 			v1.MessagesTableName,
 			v1.MessagesFieldID,
 			v1.MessagesFieldRemoteID,
@@ -415,13 +424,19 @@ func (w writeOps) CreateMessages(ctx context.Context, reqs ...*db.CreateMessageR
 			v1.MessagesFieldBody,
 			v1.MessagesFieldBodyStructure,
 			v1.MessagesFieldEnvelope,
-			strings.Join(xslices.Repeat("(?,?,?,?,?,?,?)", len(chunk)), ","),
+			v4.MessagesFieldObjectID,
+			strings.Join(xslices.Repeat("(?,?,?,?,?,?,?,?)", len(chunk)), ","),
 		)
 
-		args := make([]any, 0, len(chunk)*6)
+		args := make([]any, 0, len(chunk)*8)
 		flagArgs := make([]any, 0, len(chunk)*2)
 
 		for _, req := range chunk {
+			objectID := req.ObjectID
+			if len(objectID) == 0 {
+				objectID = imap.EmailID(uuid.NewString())
+			}
+
 			args = append(args,
 				req.InternalID,
 				req.Message.ID,
@@ -429,7 +444,8 @@ func (w writeOps) CreateMessages(ctx context.Context, reqs ...*db.CreateMessageR
 				req.LiteralSize,
 				req.Body,
 				req.Structure,
-				req.Envelope)
+				req.Envelope,
+				objectID)
 
 			for _, f := range req.Message.Flags.ToSliceUnsorted() {
 				flagArgs = append(flagArgs, req.InternalID, f)
@@ -453,14 +469,30 @@ func (w writeOps) CreateMessages(ctx context.Context, reqs ...*db.CreateMessageR
 				return err
 			}
 		}
+
+		for _, req := range chunk {
+			tokens := req.ThreadTokens
+			if len(tokens) == 0 {
+				tokens = thread.ExtractTokens(nil, req.InternalID.String())
+			}
+
+			if err := insertMessageThreadTokens(ctx, w.qw, req.InternalID, tokens); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
 }
 
 func (w writeOps) CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.InternalMailboxID, req *db.CreateMessageReq) (imap.UID, imap.FlagSet, error) {
+	objectID := req.ObjectID
+	if len(objectID) == 0 {
+		objectID = imap.EmailID(uuid.NewString())
+	}
+
 	createMessageQuery := fmt.Sprintf(
-		"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`) VALUES (?,?,?,?,?,?,?)",
+		"INSERT INTO %v (`%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`, `%v`) VALUES (?,?,?,?,?,?,?,?)",
 		v1.MessagesTableName,
 		v1.MessagesFieldID,
 		v1.MessagesFieldRemoteID,
@@ -469,6 +501,7 @@ func (w writeOps) CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.In
 		v1.MessagesFieldBody,
 		v1.MessagesFieldBodyStructure,
 		v1.MessagesFieldEnvelope,
+		v4.MessagesFieldObjectID,
 	)
 
 	if _, err := utils.ExecQuery(
@@ -481,7 +514,17 @@ func (w writeOps) CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.In
 		req.Body,
 		req.Structure,
 		req.Envelope,
+		objectID,
 	); err != nil {
+		return 0, imap.FlagSet{}, err
+	}
+
+	tokens := req.ThreadTokens
+	if len(tokens) == 0 {
+		tokens = thread.ExtractTokens(nil, req.InternalID.String())
+	}
+
+	if err := insertMessageThreadTokens(ctx, w.qw, req.InternalID, tokens); err != nil {
 		return 0, imap.FlagSet{}, err
 	}
 
@@ -535,7 +578,16 @@ func (w writeOps) CreateMessageAndAddToMailbox(ctx context.Context, mbox imap.In
 	return mboxUID, flags, nil
 }
 
-func (w writeOps) MarkMessageAsDeleted(ctx context.Context, id imap.InternalMessageID) error {
+func (w writeOps) MarkMessageAsDeleted(ctx context.Context, id imap.InternalMessageID) ([]imap.InternalMessageID, error) {
+	neighbors, err := getThreadTokenNeighbors(ctx, w.qw, []imap.InternalMessageID{id})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := deleteMessageThreadTokens(ctx, w.qw, id); err != nil {
+		return nil, err
+	}
+
 	query := fmt.Sprintf(
 		"UPDATE %v SET `%v` = TRUE WHERE `%v` = ?",
 		v1.MessagesTableName,
@@ -543,38 +595,109 @@ func (w writeOps) MarkMessageAsDeleted(ctx context.Context, id imap.InternalMess
 		v1.MessagesFieldID,
 	)
 
-	_, err := utils.ExecQuery(ctx, w.qw, query, id)
+	if _, err := utils.ExecQuery(ctx, w.qw, query, id); err != nil {
+		return nil, err
+	}
 
-	return err
+	return neighbors, nil
 }
 
-func (w writeOps) MarkMessageAsDeletedAndAssignRandomRemoteID(ctx context.Context, id imap.InternalMessageID) error {
-	query := fmt.Sprintf(
-		"UPDATE %v SET `%v` = TRUE, `%v` = ? WHERE `%v` = ?",
-		v1.MessagesTableName,
-		v1.MessagesFieldDeleted,
-		v1.MessagesFieldRemoteID,
-		v1.MessagesFieldID,
-	)
+func (w writeOps) MarkMessageAsDeletedWithRemoteID(ctx context.Context, id imap.MessageID) ([]imap.InternalMessageID, error) {
+	internalID, err := w.GetMessageIDFromRemoteID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 
-	randomID := imap.MessageID(fmt.Sprintf("DELETED-%v", imap.NewInternalMessageID()))
-
-	_, err := utils.ExecQuery(ctx, w.qw, query, randomID, id)
-
-	return err
+	return w.MarkMessageAsDeleted(ctx, internalID)
 }
 
-func (w writeOps) MarkMessageAsDeletedWithRemoteID(ctx context.Context, id imap.MessageID) error {
-	query := fmt.Sprintf(
-		"UPDATE %v SET `%v` = TRUE WHERE `%v` = ?",
-		v1.MessagesTableName,
-		v1.MessagesFieldDeleted,
-		v1.MessagesFieldRemoteID,
-	)
+// ReplaceMessageLiteral swaps the stored message of an existing logical email for a new literal.
+// The old row is tombstoned (its remote id is randomized and its EMAILID released) while a fresh
+// row inherits the SAME EMAILID and THREADID, so a connector-driven update never changes the
+// object identifiers clients observe. Threading tokens are replaced and membership is recomputed
+// over the union of the old and new neighborhoods, all within the caller's transaction.
+func (w writeOps) ReplaceMessageLiteral(ctx context.Context, oldInternalID imap.InternalMessageID, req *db.CreateMessageReq) ([]db.ThreadAssignment, error) {
+	// Capture the old neighborhood before its tokens are removed.
+	neighbors, err := getThreadTokenNeighbors(ctx, w.qw, []imap.InternalMessageID{oldInternalID})
+	if err != nil {
+		return nil, err
+	}
 
-	_, err := utils.ExecQuery(ctx, w.qw, query, id)
+	var oldObjectID imap.EmailID
 
-	return err
+	{
+		query := fmt.Sprintf("SELECT `%v` FROM %v WHERE `%v` = ?",
+			v4.MessagesFieldObjectID, v1.MessagesTableName, v1.MessagesFieldID)
+
+		var objectID sql.NullString
+
+		if err := w.qw.QueryRowContext(ctx, query, oldInternalID).Scan(&objectID); err != nil {
+			return nil, err
+		}
+
+		if objectID.Valid {
+			oldObjectID = imap.EmailID(objectID.String)
+		}
+	}
+
+	var oldThreadID imap.ThreadID
+
+	{
+		query := fmt.Sprintf("SELECT `%v` FROM %v WHERE `%v` = ?",
+			v4.MessagesFieldThreadID, v1.MessagesTableName, v1.MessagesFieldID)
+
+		var threadID sql.NullString
+
+		if err := w.qw.QueryRowContext(ctx, query, oldInternalID).Scan(&threadID); err != nil {
+			return nil, err
+		}
+
+		if threadID.Valid {
+			oldThreadID = imap.ThreadID(threadID.String)
+		}
+	}
+
+	// Release the unique remote id and EMAILID of the old row and detach its tokens.
+	randomRemoteID := imap.MessageID(fmt.Sprintf("DELETED-%v", imap.NewInternalMessageID()))
+
+	{
+		query := fmt.Sprintf(
+			"UPDATE %v SET `%v` = TRUE, `%v` = ?, `%v` = NULL WHERE `%v` = ?",
+			v1.MessagesTableName,
+			v1.MessagesFieldDeleted,
+			v1.MessagesFieldRemoteID,
+			v4.MessagesFieldObjectID,
+			v1.MessagesFieldID,
+		)
+
+		if _, err := utils.ExecQuery(ctx, w.qw, query, randomRemoteID, oldInternalID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := deleteMessageThreadTokens(ctx, w.qw, oldInternalID); err != nil {
+		return nil, err
+	}
+
+	// Insert the new row carrying the persistent identities.
+	newReq := *req
+	newReq.ObjectID = oldObjectID
+
+	if err := w.CreateMessages(ctx, &newReq); err != nil {
+		return nil, err
+	}
+
+	// Inherit the previous THREADID before recomputing, then recompute membership over both the
+	// new message and every message it used to be related to.
+	if len(oldThreadID) != 0 {
+		if err := updateMessageThreadID(ctx, w.qw, newReq.InternalID, oldThreadID); err != nil {
+			return nil, err
+		}
+	}
+
+	seed := append([]imap.InternalMessageID{newReq.InternalID}, neighbors...)
+
+	return recomputeMessageThreads(ctx, w.qw, seed)
 }
 
 func (w writeOps) DeleteMessages(ctx context.Context, ids []imap.InternalMessageID) error {

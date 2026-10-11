@@ -29,6 +29,7 @@ func TestExamineWithLiteral(t *testing.T) {
 			`* OK [PERMANENTFLAGS (\Deleted \Flagged \Seen)]`,
 			`* OK [UIDNEXT 2]`,
 			`* OK [UIDVALIDITY 1]`)
+		c.Sx(`\* OK \[MAILBOXID \([0-9a-f-]+\)\] Mailbox id`)
 		c.S(`a007 OK [READ-ONLY] EXAMINE`)
 	})
 }

@@ -18,24 +18,31 @@ import (
 	"github.com/ProtonMail/gluon/rfc5322"
 	"github.com/ProtonMail/gluon/rfc822"
 	"github.com/bradenaw/juniper/parallel"
+	"github.com/bradenaw/juniper/xslices"
 	"golang.org/x/text/encoding"
 )
 
 var totalActiveSearchRequests int32
 
-func (m *Mailbox) Search(ctx context.Context, keys []command.SearchKey, decoder *encoding.Decoder) ([]uint32, error) {
-	var mapFn func(snapMsgWithSeq) uint32
+// SearchMatch is a message matched by a SEARCH command together with the values needed to render
+// the classic * SEARCH response and the RFC 8474 EMAILID/THREADID correlators.
+type SearchMatch struct {
+	Seq      imap.SeqID
+	UID      imap.UID
+	EmailID  imap.EmailID
+	ThreadID imap.ThreadID
+}
 
-	if contexts.IsUID(ctx) {
-		mapFn = func(s snapMsgWithSeq) uint32 {
-			return uint32(s.UID)
-		}
-	} else {
-		mapFn = func(s snapMsgWithSeq) uint32 {
-			return uint32(s.Seq)
-		}
+// Number returns the UID in a UID SEARCH context and the sequence number otherwise.
+func (s SearchMatch) Number(asUID bool) uint32 {
+	if asUID {
+		return uint32(s.UID)
 	}
 
+	return uint32(s.Seq)
+}
+
+func (m *Mailbox) Search(ctx context.Context, keys []command.SearchKey, decoder *encoding.Decoder) ([]SearchMatch, error) {
 	op, err := buildSearchOpListWithKeys(m, keys, decoder)
 	if err != nil {
 		return nil, err
@@ -43,7 +50,7 @@ func (m *Mailbox) Search(ctx context.Context, keys []command.SearchKey, decoder 
 
 	msgCount := m.snap.len()
 
-	result := make([]uint32, msgCount)
+	result := make([]snapMsgWithSeq, msgCount)
 
 	activeSearchRequests := atomic.AddInt32(&totalActiveSearchRequests, 1)
 	defer atomic.AddInt32(&totalActiveSearchRequests, -1)
@@ -70,7 +77,7 @@ func (m *Mailbox) Search(ctx context.Context, keys []command.SearchKey, decoder 
 		}
 
 		if matches {
-			result[i] = mapFn(msg)
+			result[i] = msg
 		}
 
 		return nil
@@ -78,8 +85,17 @@ func (m *Mailbox) Search(ctx context.Context, keys []command.SearchKey, decoder 
 		return nil, err
 	}
 
-	return utils.Filter(result, func(v uint32) bool {
-		return v != 0
+	matched := utils.Filter(result, func(v snapMsgWithSeq) bool {
+		return v.snapMsg != nil
+	})
+
+	return xslices.Map(matched, func(msg snapMsgWithSeq) SearchMatch {
+		return SearchMatch{
+			Seq:      msg.Seq,
+			UID:      msg.UID,
+			EmailID:  msg.objectID,
+			ThreadID: msg.threadID,
+		}
 	}), nil
 }
 
@@ -211,6 +227,12 @@ func buildSearchOp(m *Mailbox, key command.SearchKey, decoder *encoding.Decoder)
 	case *command.SearchKeyAll:
 		return buildSearchOpAll()
 
+	case *command.SearchKeyEmailID:
+		return buildSearchOpEmailID(key)
+
+	case *command.SearchKeyThreadID:
+		return buildSearchOpThreadID(key)
+
 	case *command.SearchKeyAnswered:
 		return buildSearchOpAnswered()
 
@@ -327,6 +349,22 @@ func buildSearchOp(m *Mailbox, key command.SearchKey, decoder *encoding.Decoder)
 func buildSearchOpAll() (*buildSearchOpResult, error) {
 	op := func(data *searchData) (bool, error) {
 		return true, nil
+	}
+
+	return newBuildSearchOpResult(op), nil
+}
+
+func buildSearchOpEmailID(key *command.SearchKeyEmailID) (*buildSearchOpResult, error) {
+	op := func(s *searchData) (bool, error) {
+		return string(s.message.objectID) == key.Value, nil
+	}
+
+	return newBuildSearchOpResult(op), nil
+}
+
+func buildSearchOpThreadID(key *command.SearchKeyThreadID) (*buildSearchOpResult, error) {
+	op := func(s *searchData) (bool, error) {
+		return string(s.message.threadID) == key.Value, nil
 	}
 
 	return newBuildSearchOpResult(op), nil

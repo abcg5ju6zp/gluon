@@ -15,10 +15,12 @@ import (
 	"github.com/ProtonMail/gluon/imap"
 	"github.com/ProtonMail/gluon/internal/ids"
 	"github.com/ProtonMail/gluon/internal/state"
+	"github.com/ProtonMail/gluon/internal/thread"
 	"github.com/ProtonMail/gluon/pkg/utils"
 	"github.com/ProtonMail/gluon/rfc822"
 	"github.com/bradenaw/juniper/parallel"
 	"github.com/bradenaw/juniper/xslices"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -305,12 +307,14 @@ func (user *user) applyMessagesCreated(ctx context.Context, update *imap.Message
 
 					request := &DBRequestWithLiteral{
 						CreateMessageReq: db.CreateMessageReq{
-							Message:     message.Message,
-							LiteralSize: literalSize,
-							Body:        message.ParsedMessage.Body,
-							Structure:   message.ParsedMessage.Structure,
-							Envelope:    message.ParsedMessage.Envelope,
-							InternalID:  internalID,
+							Message:      message.Message,
+							LiteralSize:  literalSize,
+							Body:         message.ParsedMessage.Body,
+							Structure:    message.ParsedMessage.Structure,
+							Envelope:     message.ParsedMessage.Envelope,
+							InternalID:   internalID,
+							ObjectID:     imap.EmailID(uuid.NewString()),
+							ThreadTokens: thread.ExtractTokens(message.Literal, internalID.String()),
 						},
 						reader: literalReader,
 					}
@@ -390,7 +394,23 @@ func (user *user) applyMessagesCreated(ctx context.Context, update *imap.Message
 			}
 		}
 
+		// Recompute thread membership once for the whole batch so that messages referencing each
+		// other all end up in the same thread; the assignment is committed atomically with the
+		// batch (no visible id-without-message or message-without-id).
+		newInternalIDs := xslices.Map(messagesToCreate, func(req *DBRequestWithLiteral) imap.InternalMessageID {
+			return req.InternalID
+		})
+
+		threadAssignments, err := tx.RecomputeMessageThreads(ctx, newInternalIDs)
+		if err != nil {
+			return nil, err
+		}
+
 		var stateUpdates []state.Update
+
+		if len(threadAssignments) != 0 {
+			stateUpdates = append(stateUpdates, state.NewThreadIDsStateUpdate(threadAssignments))
+		}
 
 		// Assign all the messages to the mailbox
 		for mboxID, msgList := range messageForMBox {
@@ -629,7 +649,8 @@ func (user *user) removeMessageFlags(ctx context.Context, tx db.Transaction, mes
 
 func (user *user) applyMessageDeleted(ctx context.Context, update *imap.MessageDeleted) error {
 	if err := userDBWrite(ctx, user, func(ctx context.Context, tx db.Transaction) ([]state.Update, error) {
-		if err := tx.MarkMessageAsDeletedWithRemoteID(ctx, update.MessageID); err != nil {
+		neighbors, err := tx.MarkMessageAsDeletedWithRemoteID(ctx, update.MessageID)
+		if err != nil {
 			if db.IsErrNotFound(err) {
 				return nil, nil
 			}
@@ -662,6 +683,17 @@ func (user *user) applyMessageDeleted(ctx context.Context, update *imap.MessageD
 			}
 
 			stateUpdates = append(stateUpdates, updates...)
+		}
+
+		// Removing the message may split a thread; recompute over the neighborhood it left so
+		// snapshots never mix old and new thread ids.
+		threadAssignments, err := tx.RecomputeMessageThreads(ctx, neighbors)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(threadAssignments) != 0 {
+			stateUpdates = append(stateUpdates, state.NewThreadIDsStateUpdate(threadAssignments))
 		}
 
 		return stateUpdates, nil
@@ -729,7 +761,9 @@ func (user *user) applyMessageUpdated(ctx context.Context, update *imap.MessageU
 		}
 	}
 
-	return userDBWrite(ctx, user, func(ctx context.Context, tx db.Transaction) ([]state.Update, error) {
+	var newStoreID imap.InternalMessageID
+
+	err = userDBWrite(ctx, user, func(ctx context.Context, tx db.Transaction) ([]state.Update, error) {
 		if literalUnchanged {
 			log.Debug("Message literal has no meaningful changes, assigning mailboxes only")
 			return user.applyMessageMailboxesOnlyUpdate(ctx, tx, internalMessageID, update)
@@ -756,17 +790,14 @@ func (user *user) applyMessageUpdated(ctx context.Context, update *imap.MessageU
 
 				stateUpdates = append(stateUpdates, updates...)
 			}
-
-			// We need change the old remote id as it will break our table constraint otherwise and everything
-			// will silently fail.
-			if err := tx.MarkMessageAsDeletedAndAssignRandomRemoteID(ctx, internalMessageID); err != nil {
-				return nil, err
-			}
 		}
 
 		// create new entry
+		var threadAssignments []db.ThreadAssignment
+
 		{
 			newInternalID := imap.NewInternalMessageID()
+			newStoreID = newInternalID
 
 			literalReader, literalSize, err := rfc822.SetHeaderValueNoMemCopy(update.Literal, ids.InternalIDKey, newInternalID.String())
 			if err != nil {
@@ -774,15 +805,19 @@ func (user *user) applyMessageUpdated(ctx context.Context, update *imap.MessageU
 			}
 
 			request := &db.CreateMessageReq{
-				Message:     update.Message,
-				LiteralSize: literalSize,
-				Body:        update.ParsedMessage.Body,
-				Structure:   update.ParsedMessage.Structure,
-				Envelope:    update.ParsedMessage.Envelope,
-				InternalID:  newInternalID,
+				Message:      update.Message,
+				LiteralSize:  literalSize,
+				Body:         update.ParsedMessage.Body,
+				Structure:    update.ParsedMessage.Structure,
+				Envelope:     update.ParsedMessage.Envelope,
+				InternalID:   newInternalID,
+				ThreadTokens: thread.ExtractTokens(update.Literal, newInternalID.String()),
 			}
 
-			if err := tx.CreateMessages(ctx, request); err != nil {
+			// Replace the stored row while preserving the persistent EMAILID and THREADID, and
+			// recompute thread membership over the old and new token neighborhoods.
+			threadAssignments, err = tx.ReplaceMessageLiteral(ctx, internalMessageID, request)
+			if err != nil {
 				return nil, err
 			}
 
@@ -819,8 +854,24 @@ func (user *user) applyMessageUpdated(ctx context.Context, update *imap.MessageU
 			}
 		}
 
+		if len(threadAssignments) != 0 {
+			stateUpdates = append(stateUpdates, state.NewThreadIDsStateUpdate(threadAssignments))
+		}
+
 		return stateUpdates, nil
 	})
+	if err != nil {
+		// Best effort cleanup of the orphaned cached literal when the transaction was rolled back.
+		if newStoreID.String() != "" {
+			if delErr := user.store.DeleteUnchecked(newStoreID); delErr != nil && !os.IsNotExist(delErr) {
+				log.WithError(delErr).Errorf("Failed to delete cache message %v after failed update", newStoreID)
+			}
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 // applyMessageMailboxesOnlyUpdate applies flag and mailbox membership changes for an updated message

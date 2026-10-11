@@ -23,6 +23,7 @@ type Mailbox struct {
 	name        string
 	subscribed  bool
 	uidValidity imap.UID
+	objectID    imap.MailboxObjectID
 
 	state *State
 	snap  *snapshot
@@ -46,6 +47,7 @@ func newMailbox(mbox *db.Mailbox, state *State, snap *snapshot) *Mailbox {
 		id:          id,
 		name:        mbox.Name,
 		uidValidity: mbox.UIDValidity,
+		objectID:    mbox.ObjectID,
 
 		state: state,
 
@@ -56,6 +58,11 @@ func newMailbox(mbox *db.Mailbox, state *State, snap *snapshot) *Mailbox {
 			WithField("pkg", "gluon/state/mailbox").
 			WithField("mboxID", id.String()),
 	}
+}
+
+// ObjectID returns the persistent RFC 8474 MAILBOXID of the mailbox.
+func (m *Mailbox) ObjectID() imap.MailboxObjectID {
+	return m.objectID
 }
 
 func (m *Mailbox) Name() string {

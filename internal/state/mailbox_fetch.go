@@ -65,6 +65,10 @@ func (m *Mailbox) Fetch(ctx context.Context, cmd *command.Fetch, ch chan respons
 			wantUID = true
 
 			operations = append(operations, fetchUID)
+		case *command.FetchAttributeEmailID:
+			operations = append(operations, fetchEmailID)
+		case *command.FetchAttributeThreadID:
+			operations = append(operations, fetchThreadID)
 		case *command.FetchAttributeRFC822:
 			setSeen = true
 			needsLiteral = true
@@ -239,6 +243,14 @@ func fetchBodyStructure(_ snapMsgWithSeq, message *db.Message, _ *fetchContext) 
 
 func fetchUID(msg snapMsgWithSeq, _ *db.Message, _ *fetchContext) (response.Item, error) {
 	return response.ItemUID(msg.UID), nil
+}
+
+func fetchEmailID(msg snapMsgWithSeq, _ *db.Message, _ *fetchContext) (response.Item, error) {
+	return response.ItemEmailID(msg.objectID), nil
+}
+
+func fetchThreadID(msg snapMsgWithSeq, _ *db.Message, _ *fetchContext) (response.Item, error) {
+	return response.ItemThreadID(msg.threadID), nil
 }
 
 func fetchAttributeBodySection(attribute *command.FetchAttributeBodySection, fc *fetchContext) (response.Item, error) {

@@ -64,10 +64,24 @@ type exists struct {
 	messageID  db.MessageIDPair
 	messageUID imap.UID
 	flags      imap.FlagSet
+	objectID   imap.EmailID
+	threadID   imap.ThreadID
 }
 
-func newExists(messageID db.MessageIDPair, messageUID imap.UID, flags imap.FlagSet) *exists {
-	return &exists{messageID: messageID, messageUID: messageUID, flags: flags}
+func newExists(
+	messageID db.MessageIDPair,
+	messageUID imap.UID,
+	flags imap.FlagSet,
+	objectID imap.EmailID,
+	threadID imap.ThreadID,
+) *exists {
+	return &exists{
+		messageID:  messageID,
+		messageUID: messageUID,
+		flags:      flags,
+		objectID:   objectID,
+		threadID:   threadID,
+	}
 }
 
 func (u *exists) String() string {
@@ -105,13 +119,13 @@ func (u *targetedExists) handle(ctx context.Context, snap *snapshot, stateID Sta
 	}
 
 	if u.originStateSet && u.originStateID == stateID {
-		if err := snap.appendMessage(u.resp.messageID, u.resp.messageUID, flags); err != nil {
+		if err := snap.appendMessage(u.resp.messageID, u.resp.messageUID, flags, u.resp.objectID, u.resp.threadID); err != nil {
 			// No events reported so far.
 			reporter.ExceptionWithContext(ctx, "Failed to append message to snap via targetedExists", reporter.Context{"error": err})
 			return nil, nil, err
 		}
 	} else {
-		if err := snap.appendMessageFromOtherState(u.resp.messageID, u.resp.messageUID, flags); err != nil {
+		if err := snap.appendMessageFromOtherState(u.resp.messageID, u.resp.messageUID, flags, u.resp.objectID, u.resp.threadID); err != nil {
 			return nil, nil, err
 		}
 	}

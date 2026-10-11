@@ -90,6 +90,7 @@ type Mailbox struct {
 	Name        string
 	UIDValidity imap.UID
 	Subscribed  bool
+	ObjectID    imap.MailboxObjectID
 }
 
 type MailboxWithAttr struct {
@@ -106,6 +107,16 @@ type Message struct {
 	BodyStructure string
 	Envelope      string
 	Deleted       bool
+	ObjectID      imap.EmailID
+	ThreadID      imap.ThreadID
+}
+
+// ThreadAssignment describes the current THREADID of a message after thread membership has been
+// (re)computed. It is returned by write operations that may cause threads to merge or split so
+// that in-memory snapshots can be updated atomically with the commit.
+type ThreadAssignment struct {
+	InternalID imap.InternalMessageID
+	ThreadID   imap.ThreadID
 }
 
 type MessageWithFlags struct {

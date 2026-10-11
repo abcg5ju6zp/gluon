@@ -15,6 +15,7 @@ const (
 	StatusAttributeUIDNext
 	StatusAttributeUIDValidity
 	StatusAttributeUnseen
+	StatusAttributeMailboxID
 )
 
 func (s StatusAttribute) String() string {
@@ -29,6 +30,8 @@ func (s StatusAttribute) String() string {
 		return "UIDVALIDITY"
 	case StatusAttributeUnseen:
 		return "UNSEEN"
+	case StatusAttributeMailboxID:
+		return "MAILBOXID"
 	default:
 		return "UNKNOWN"
 	}
@@ -129,6 +132,8 @@ func parseStatusAttribute(p *rfcparser.Parser) (StatusAttribute, error) {
 		return StatusAttributeUIDValidity, nil
 	case "unseen":
 		return StatusAttributeUnseen, nil
+	case "mailboxid":
+		return StatusAttributeMailboxID, nil
 	default:
 		return 0, p.MakeErrorAtOffset(fmt.Sprintf("unknown status attribute '%v'", attributeStr), attributeStr.Offset)
 	}

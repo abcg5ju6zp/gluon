@@ -18,6 +18,8 @@ type snapMsg struct {
 	UID       imap.UID
 	flags     imap.FlagSet
 	toExpunge bool
+	objectID  imap.EmailID
+	threadID  imap.ThreadID
 }
 
 type snapMsgWithSeq struct {
@@ -48,7 +50,13 @@ func (list *snapMsgList) binarySearchByUID(uid imap.UID) (int, bool) {
 	return index, ok
 }
 
-func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet) error {
+func (list *snapMsgList) insert(
+	msgID db.MessageIDPair,
+	msgUID imap.UID,
+	flags imap.FlagSet,
+	objectID imap.EmailID,
+	threadID imap.ThreadID,
+) error {
 	if len(list.msg) > 0 && list.msg[len(list.msg)-1].UID >= msgUID {
 		return fmt.Errorf("UID-Last=%v UID-Msg=%v: %w", list.msg[len(list.msg)-1].UID, msgUID, ErrOutOfOrderUIDInsertion)
 	}
@@ -58,6 +66,8 @@ func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags i
 		UID:       msgUID,
 		flags:     flags,
 		toExpunge: flags.ContainsUnchecked(imap.FlagDeletedLowerCase),
+		objectID:  objectID,
+		threadID:  threadID,
 	}
 
 	list.msg = append(list.msg, snapMsg)
@@ -67,7 +77,13 @@ func (list *snapMsgList) insert(msgID db.MessageIDPair, msgUID imap.UID, flags i
 	return nil
 }
 
-func (list *snapMsgList) insertOutOfOrder(msgID db.MessageIDPair, msgUID imap.UID, flags imap.FlagSet) {
+func (list *snapMsgList) insertOutOfOrder(
+	msgID db.MessageIDPair,
+	msgUID imap.UID,
+	flags imap.FlagSet,
+	objectID imap.EmailID,
+	threadID imap.ThreadID,
+) {
 	index, ok := list.binarySearchByUID(msgUID)
 	if ok {
 		panic("Duplicate UID added")
@@ -78,6 +94,8 @@ func (list *snapMsgList) insertOutOfOrder(msgID db.MessageIDPair, msgUID imap.UI
 		UID:       msgUID,
 		flags:     flags,
 		toExpunge: flags.ContainsUnchecked(imap.FlagDeletedLowerCase),
+		objectID:  objectID,
+		threadID:  threadID,
 	}
 
 	list.msg = slices.Insert(list.msg, index, snapMsg)
@@ -113,6 +131,18 @@ func (list *snapMsgList) update(internalID imap.InternalMessageID, remoteID imap
 	}
 
 	snapMsg.ID.RemoteID = remoteID
+
+	return true
+}
+
+// updateThreadID updates the persistent THREADID of a message in the snapshot.
+func (list *snapMsgList) updateThreadID(internalID imap.InternalMessageID, threadID imap.ThreadID) bool {
+	snapMsg, ok := list.idx[internalID]
+	if !ok {
+		return false
+	}
+
+	snapMsg.threadID = threadID
 
 	return true
 }

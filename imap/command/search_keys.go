@@ -18,6 +18,32 @@ func (s SearchKeyAll) SanitizedString() string {
 	return s.String()
 }
 
+// SearchKeyEmailID matches a message by its RFC 8474 EMAILID.
+type SearchKeyEmailID struct {
+	Value string
+}
+
+func (s SearchKeyEmailID) String() string {
+	return fmt.Sprintf("EMAILID %v", s.Value)
+}
+
+func (s SearchKeyEmailID) SanitizedString() string {
+	return s.String()
+}
+
+// SearchKeyThreadID matches a message by its RFC 8474 THREADID.
+type SearchKeyThreadID struct {
+	Value string
+}
+
+func (s SearchKeyThreadID) String() string {
+	return fmt.Sprintf("THREADID %v", s.Value)
+}
+
+func (s SearchKeyThreadID) SanitizedString() string {
+	return s.String()
+}
+
 type SearchKeyAnswered struct{}
 
 func (s SearchKeyAnswered) String() string {
